@@ -1,0 +1,22 @@
+# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Customer/order data
+*.xlsx
+*.xls
+*.csv
+
+# Invoices / documents
+*.pdf
+
+# Environment / secrets
+.env
+*.env
+
+# Temporary files
+*.log
+*.tmp
