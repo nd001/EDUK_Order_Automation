@@ -20,3 +20,10 @@ __pycache__/
 # Temporary files
 *.log
 *.tmp
+
+# Excel temporary files
+~$*
+.~lock.*
+
+# Local scratch files
+clipboard.txt

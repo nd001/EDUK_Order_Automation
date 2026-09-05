@@ -1,5 +1,6 @@
 import os
 import re
+import requests
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -27,10 +28,6 @@ INVOICE_FOLDER = r"C:\Users\Noel\Documents\OK TO DELETE"
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
 
-INVOICE_FOLDER = r"C:\Users\Noel\Documents\OK TO DELETE"
-
-
-
 # ============================================================
 # LOAD REMOTE CREDENTIALS
 # ============================================================
@@ -39,6 +36,24 @@ load_dotenv()
 
 RP2_REMOTE_USERNAME = os.getenv("RP2_REMOTE_USERNAME")
 RP2_REMOTE_PASSWORD = os.getenv("RP2_REMOTE_PASSWORD")
+
+MIRAKL_BASE_URL = os.getenv(
+    "MIRAKL_BASE_URL"
+)
+
+MIRAKL_API_KEY = os.getenv(
+    "MIRAKL_API_KEY"
+)
+
+if not MIRAKL_BASE_URL:
+    raise RuntimeError(
+        "MIRAKL_BASE_URL missing from .env"
+    )
+
+if not MIRAKL_API_KEY:
+    raise RuntimeError(
+        "MIRAKL_API_KEY missing from .env"
+    )
 
 
 if MODE == "remote":
@@ -61,6 +76,105 @@ else:
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
+
+def read_mirakl_order(order_id):
+    """
+    Read one B&Q Mirakl order.
+
+    READ ONLY.
+    """
+
+    url = (
+        f"{MIRAKL_BASE_URL.rstrip('/')}"
+        f"/api/orders"
+    )
+
+    headers = {
+        "Authorization": MIRAKL_API_KEY,
+        "Accept": "application/json",
+    }
+
+    params = {
+        "order_ids": order_id
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Mirakl order lookup failed. "
+            f"HTTP {response.status_code}: "
+            f"{response.text}"
+        )
+
+    data = response.json()
+
+    orders = data.get("orders", [])
+
+    if len(orders) != 1:
+        raise RuntimeError(
+            f"Expected exactly 1 Mirakl order, "
+            f"found {len(orders)}."
+        )
+
+    order = orders[0]
+
+    customer = order.get(
+        "customer",
+        {}
+    )
+
+    shipping = customer.get(
+        "shipping_address",
+        {}
+    )
+
+    order_lines = order.get(
+        "order_lines",
+        []
+    )
+
+    if not order_lines:
+        raise RuntimeError(
+            "Mirakl order contains no order lines."
+        )
+
+    # For this first version we are validating
+    # the first line only, matching the RPii
+    # single-active-product prototype.
+    line = order_lines[0]
+
+    return {
+        "order_id": order.get("order_id"),
+        "sku": line.get("offer_sku"),
+        "price": float(
+            order.get("total_price", 0)
+        ),
+        "postcode": shipping.get(
+            "zip_code"
+        ),
+        "phone_1": shipping.get(
+            "phone"
+        ),
+        "phone_2": shipping.get(
+            "phone_secondary"
+        ),
+        "customer_name": (
+            f"{shipping.get('firstname', '')} "
+            f"{shipping.get('lastname', '')}"
+        ).strip(),
+        "description": line.get(
+            "description"
+        ),
+        "order_state": order.get(
+            "order_state"
+        ),
+    }
 
 def read_payment_summary(sales_frame):
     """
@@ -264,6 +378,150 @@ def normalise_phone(number):
         number = "0" + number[2:]
 
     return number
+
+def build_customer_address(delivery_customer):
+    """
+    Format the RPii delivery address for the customer message.
+
+    Example:
+        Katie Nation
+        19, Lilford Gardens
+        Plymouth
+        PL5 2DP
+        T: 07943143237
+    """
+
+    name = delivery_customer.get("name") or ""
+    address = delivery_customer.get("address") or ""
+    postcode = delivery_customer.get("postcode") or ""
+    telephone = delivery_customer.get("telephone") or ""
+
+    lines = []
+
+    if name:
+        lines.append(name)
+
+    address_parts = [
+        part.strip()
+        for part in address.split(",")
+        if part.strip()
+    ]
+
+    # Remove postcode from address because we'll add it
+    # separately below.
+    address_parts = [
+        part
+        for part in address_parts
+        if part.upper() != postcode.upper()
+    ]
+
+    if len(address_parts) >= 2:
+
+        # Keep house number + street together
+        lines.append(
+            f"{address_parts[0]}, {address_parts[1]}"
+        )
+
+        # Add town/city/etc. on subsequent lines
+        lines.extend(address_parts[2:])
+
+    elif address_parts:
+
+        lines.extend(address_parts)
+
+    if postcode:
+        lines.append(postcode)
+
+    if telephone:
+        lines.append(f"T: {telephone}")
+
+    return "\n".join(lines)
+
+
+def build_sgk_message(
+    delivery_customer,
+    product_sku,
+    product_description,
+    collection_date,
+):
+    address_block = build_customer_address(
+        delivery_customer
+    )
+
+    item_text = (
+        f"{product_sku} - {product_description}"
+    )
+
+    return f"""Good Morning,
+
+Thank you for placing your order with Electrical Discount UK.
+
+***For any queries regarding delivery information, please call our office on 01282 443850 - Mon-Fri 9-5/Sat 9-3***
+
+Please find attached a copy of your invoice.
+
+Delivery Details:
+
+Item: {item_text}
+
+{address_block}
+
+Please check that these details are correct and let us know if any changes are needed.
+
+Your item(s) will be collected by SGK Distribution on {collection_date}. Once collected, the courier will contact you within 48 hours to arrange a convenient delivery date.
+
+⚠️ Important: Missed or cancelled deliveries, once a date has been agreed, may incur additional charges. Please ensure someone is available to receive the delivery.
+
+If you have any questions or need further assistance, feel free to contact us.
+
+Kind regards,
+
+Electrical Discount UK
+
+Customer Service"""
+
+
+def build_ed_message(
+    delivery_customer,
+    product_sku,
+    product_description,
+    delivery_date,
+):
+    address_block = build_customer_address(
+        delivery_customer
+    )
+
+    item_text = (
+        f"{product_sku} - {product_description}"
+    )
+
+    return f"""Thank you for purchasing from Electrical Discount UK.
+
+*** For ANY queries regarding delivery information, please call our office on 01282 443850 - Mon-Fri 9-5 / Sat 9-3 ***
+
+Your item has been dispatched and is due for delivery on {delivery_date} between 7am and 7pm.
+
+Item: {item_text}
+
+The delivery address we have for you is:
+
+{address_block}
+
+We will email you the day before with an estimated delivery window.
+
+Please note that circumstances such as traffic or weather may affect the time window given.
+
+It is very important that you contact us if there are any steps or stairs leading up to your property. We may have to use a different courier altering the delivery day.
+
+Please note this is a delivery only, no installation.
+
+If you have paid for a scrap collection please make sure the item is disconnected and placed outside (unless other arrangements have been agreed) prior to the arrival of the driver.
+
+If you require any further information please do not hesitate to contact our sales team on 01282 443850 (direct landline).
+
+Kind Regards,
+
+Electrical Discount UK"""
 
 def parse_delivery_block(text):
     """
@@ -781,10 +1039,6 @@ with sync_playwright() as p:
     # READ RPii CUSTOMER ACCOUNT
     # ========================================================
 
-    ccustomer_panels = sales_frame.locator(
-    "td.SALES-panel-s"
-)
-
     customer_panel = None
 
     for i in range(customer_panels.count()):
@@ -1134,6 +1388,313 @@ with sync_playwright() as p:
         )
 
     # ========================================================
+    # SAFETY CHECK 5 - TELEPHONE
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("SAFETY CHECK 5 - TELEPHONE")
+    print("=" * 60)
+
+    excel_phone_1 = normalise_phone(
+        excel_order["phone_1"]
+    )
+
+    excel_phone_2 = normalise_phone(
+        excel_order["phone_2"]
+    )
+
+    rp2_phone = normalise_phone(
+        delivery_customer["telephone"]
+    )
+
+    print(
+        f"Excel Phone 1: {excel_order['phone_1']}"
+    )
+
+    print(
+        f"Excel Phone 2: {excel_order['phone_2']}"
+    )
+
+    print(
+        f"RPii Phone:    {delivery_customer['telephone']}"
+    )
+
+    valid_excel_phones = {
+        phone
+        for phone in (
+            excel_phone_1,
+            excel_phone_2,
+        )
+        if phone
+    }
+
+    if rp2_phone in valid_excel_phones:
+
+        print()
+        print("✓ TELEPHONE MATCH")
+
+    else:
+
+        print()
+        print("✗ TELEPHONE MISMATCH")
+        print()
+        print(
+            "STOPPING - no further processing will take place."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+
+        raise SystemExit
+
+    # ========================================================
+    # READ MIRAKL ORDER
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("MIRAKL READ-ONLY VALIDATION")
+    print("=" * 60)
+
+    mirakl_order = read_mirakl_order(
+        excel_order["order_id"]
+    )
+
+    print(
+        f"Mirakl Order:  "
+        f"{mirakl_order['order_id']}"
+    )
+
+    print(
+        f"Customer:      "
+        f"{mirakl_order['customer_name']}"
+    )
+
+    print(
+        f"SKU:           "
+        f"{mirakl_order['sku']}"
+    )
+
+    print(
+        f"Price:         "
+        f"£{mirakl_order['price']:.2f}"
+    )
+
+    print(
+        f"Postcode:      "
+        f"{mirakl_order['postcode']}"
+    )
+
+    print(
+        f"Telephone:     "
+        f"{mirakl_order['phone_1']}"
+    )
+
+    # ========================================================
+    # SAFETY GATE - EXCEL / RPii / MIRAKL
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("THREE-WAY SAFETY GATE")
+    print("=" * 60)
+
+    safety_failures = []
+
+    # --------------------------------------------------------
+    # ORDER NUMBER
+    # --------------------------------------------------------
+
+    if (
+        excel_order["order_id"]
+        == web_ref
+        == mirakl_order["order_id"]
+    ):
+        print("✓ Order number matches all 3 systems")
+    else:
+        print("✗ Order number mismatch")
+        safety_failures.append(
+            "Order number"
+        )
+
+    # --------------------------------------------------------
+    # SKU
+    # --------------------------------------------------------
+
+    excel_sku = str(
+        excel_order["sku"]
+    ).strip().upper()
+
+    rp2_sku = str(
+        sku
+    ).strip().upper()
+
+    mirakl_sku = str(
+        mirakl_order["sku"]
+    ).strip().upper()
+
+    if (
+        excel_sku
+        == rp2_sku
+        == mirakl_sku
+    ):
+        print("✓ SKU matches all 3 systems")
+    else:
+        print("✗ SKU mismatch")
+        safety_failures.append(
+            "SKU"
+        )
+
+    # --------------------------------------------------------
+    # PRICE
+    # --------------------------------------------------------
+
+    excel_price = round(
+        float(excel_order["price"]),
+        2
+    )
+
+    rp2_price = round(
+        float(total_sale),
+        2
+    )
+
+    mirakl_price = round(
+        float(mirakl_order["price"]),
+        2
+    )
+
+    if (
+        excel_price
+        == rp2_price
+        == mirakl_price
+    ):
+        print("✓ Price matches all 3 systems")
+    else:
+        print("✗ Price mismatch")
+        safety_failures.append(
+            "Price"
+        )
+
+    # --------------------------------------------------------
+    # POSTCODE
+    # --------------------------------------------------------
+
+    excel_pc = (
+        excel_order["postcode"]
+        .replace(" ", "")
+        .upper()
+    )
+
+    rp2_pc = (
+        delivery_postcode
+        .replace(" ", "")
+        .upper()
+    )
+
+    mirakl_pc = (
+        str(
+            mirakl_order["postcode"]
+        )
+        .replace(" ", "")
+        .upper()
+    )
+
+    if (
+        excel_pc
+        == rp2_pc
+        == mirakl_pc
+    ):
+        print("✓ Postcode matches all 3 systems")
+    else:
+        print("✗ Postcode mismatch")
+        safety_failures.append(
+            "Postcode"
+        )
+
+    # --------------------------------------------------------
+    # TELEPHONE
+    # --------------------------------------------------------
+
+    excel_phones = {
+        normalise_phone(
+            excel_order["phone_1"]
+        ),
+        normalise_phone(
+            excel_order["phone_2"]
+        ),
+    }
+
+    excel_phones.discard("")
+
+    rp2_phone = normalise_phone(
+        delivery_customer["telephone"]
+    )
+
+    mirakl_phones = {
+        normalise_phone(
+            mirakl_order["phone_1"]
+        ),
+        normalise_phone(
+            mirakl_order["phone_2"]
+        ),
+    }
+
+    mirakl_phones.discard("")
+
+    if (
+        rp2_phone in excel_phones
+        and rp2_phone in mirakl_phones
+    ):
+        print("✓ Telephone matches all 3 systems")
+    else:
+        print("✗ Telephone mismatch")
+        safety_failures.append(
+            "Telephone"
+        )
+
+    print("=" * 60)
+
+    # --------------------------------------------------------
+    # HARD STOP
+    # --------------------------------------------------------
+
+    if safety_failures:
+
+        print()
+        print("✗ THREE-WAY SAFETY GATE FAILED")
+        print()
+
+        print(
+            "Problems found: "
+            + ", ".join(safety_failures)
+        )
+
+        print()
+        print(
+            "STOPPING - no invoice/message "
+            "processing will continue."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    print()
+    print("✓ THREE-WAY SAFETY GATE PASSED")
+    print()
+    print(
+        "Excel, RPii and Mirakl agree."
+    )
+
+    # ========================================================
     # DETERMINE ORDER ROUTE
     # ========================================================
 
@@ -1141,6 +1702,30 @@ with sync_playwright() as p:
         order_route = "READY FOR INVOICE"
     else:
         order_route = "WAITING FOR PAYMENT"
+
+    # ========================================================
+    # PAYMENT ROUTE SAFETY STOP
+    # ========================================================
+
+    if order_route == "WAITING FOR PAYMENT":
+        print()
+        print("ORDER ROUTE")
+        print("=" * 60)
+        print("Order is waiting for payment.")
+        print()
+        print(
+            "STOPPING - no invoice has been generated "
+            "and no customer message has been prepared."
+        )
+        print()
+        print("NOTHING HAS BEEN SENT.")
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
 
     # ========================================================
     # NORMAL ROUTE - OPEN A4 INVOICE
@@ -1340,13 +1925,101 @@ with sync_playwright() as p:
             f"Saved to: {invoice_path}"
         )
 
+        # input(
+        #     "\nCheck the saved PDF file. "
+        #     "Press ENTER to close..."
+        # )
+
+        # browser.close()
+        # raise SystemExit
+
+    # ========================================================
+    # BUILD CUSTOMER MESSAGE PREVIEW
+    # ========================================================
+
+    print()
+    print("CUSTOMER MESSAGE PREVIEW")
+    print("=" * 60)
+
+    courier = delivery["courier"]
+
+    if courier == "SK":
+
+        customer_date_text = (
+            delivery["customer_date"]
+            .strftime("%d/%m/%Y")
+        )
+
+        customer_message = build_sgk_message(
+            delivery_customer,
+            sku,
+            description,
+            customer_date_text,
+        )
+
+    elif courier == "ED":
+
+        customer_date_text = (
+            delivery["customer_date"]
+            .strftime("%d/%m/%Y")
+        )
+
+        customer_message = build_ed_message(
+            delivery_customer,
+            sku,
+            description,
+            customer_date_text,
+        )
+
+    else:
+
+        print(
+            "✗ Cannot build message because "
+            "courier is not recognised."
+        )
+
         input(
-            "\nCheck the saved PDF file. "
-            "Press ENTER to close..."
+            "\nPress ENTER to close..."
         )
 
         browser.close()
         raise SystemExit
+
+    print()
+    print(
+        f"Order:       {excel_order['order_id']}"
+    )
+
+    print(
+        f"Customer:    {delivery_customer['name']}"
+    )
+
+    print(
+        f"Courier:     {courier}"
+    )
+
+    print(
+        f"Attachment:  {invoice_filename}"
+    )
+
+    print(
+        "Mirakl Topic: Information about delivery "
+        "(incl. tracking)"
+    )
+
+    print(
+        "Topic Code:   44"
+    )
+
+    print()
+    print("-" * 60)
+    print()
+    print(customer_message)
+    print()
+    print("-" * 60)
+
+    print()
+    print("NOTHING HAS BEEN SENT.")
 
     # --------------------------------------------------------
     # RPii scheduled date
@@ -1385,70 +2058,6 @@ with sync_playwright() as p:
     print("ORDER ROUTE")
     print("-" * 60)
     print(f"Route:         {order_route}")
-
-    # ========================================================
-    # SAFETY CHECK 5 - TELEPHONE
-    # ========================================================
-
-    print()
-    print("=" * 60)
-    print("SAFETY CHECK 5 - TELEPHONE")
-    print("=" * 60)
-
-    excel_phone_1 = normalise_phone(
-        excel_order["phone_1"]
-    )
-
-    excel_phone_2 = normalise_phone(
-        excel_order["phone_2"]
-    )
-
-    rp2_phone = normalise_phone(
-        delivery_customer["telephone"]
-    )
-
-    print(
-        f"Excel Phone 1: {excel_order['phone_1']}"
-    )
-
-    print(
-        f"Excel Phone 2: {excel_order['phone_2']}"
-    )
-
-    print(
-        f"RPii Phone:    {delivery_customer['telephone']}"
-    )
-
-    valid_excel_phones = {
-        phone
-        for phone in (
-            excel_phone_1,
-            excel_phone_2,
-        )
-        if phone
-    }
-
-    if rp2_phone in valid_excel_phones:
-
-        print()
-        print("✓ TELEPHONE MATCH")
-
-    else:
-
-        print()
-        print("✗ TELEPHONE MISMATCH")
-        print()
-        print(
-            "STOPPING - no further processing will take place."
-        )
-
-        input(
-            "\nPress ENTER to close..."
-        )
-
-        browser.close()
-
-        raise SystemExit
 
     # --------------------------------------------------------
     # Customer-facing date
@@ -1545,8 +2154,8 @@ with sync_playwright() as p:
     print("-" * 60)
 
     print(
-        "\nREAD-ONLY MODE: "
-        "No changes have been made to the sale."
+        "\nSAFE TEST MODE: "
+        "No Mirakl customer message has been sent."
     )
 
     input(
