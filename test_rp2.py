@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+from openpyxl import load_workbook
 
 
 # ============================================================
@@ -16,13 +17,15 @@ from playwright.sync_api import sync_playwright
 # "remote" = home / remote connection
 #
 MODE = "remote"
+ORDERS_FILE = "orders.xlsx"
 
 WORK_URL = "https://gar.rpdns.co.uk/companyGAR/rp2.cgi"
 REMOTE_URL = "https://garremote.rpdns.co.uk/companyGAR/rp2.cgi"
 
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
-TEST_ORDER = "1068814250-A"
+TEST_ORDER = None
+
 
 
 # ============================================================
@@ -246,6 +249,83 @@ def read_active_product(sales_frame):
         "quantity": quantity,
     }
 
+def read_first_bq_order(filename):
+    workbook = load_workbook(
+        filename,
+        data_only=True
+    )
+
+    sheet = workbook.active
+
+    headers = {
+        cell.value: cell.column
+        for cell in sheet[1]
+        if cell.value
+    }
+
+    required_columns = [
+        "Order number",
+        "Offer SKU",
+        "Amount",
+    ]
+
+    for column in required_columns:
+        if column not in headers:
+            raise RuntimeError(
+                f"Missing required Excel column: {column}"
+            )
+
+    # First data row = oldest/top order
+    row = 2
+
+    order_id = sheet.cell(
+        row=row,
+        column=headers["Order number"]
+    ).value
+
+    sku = sheet.cell(
+        row=row,
+        column=headers["Offer SKU"]
+    ).value
+
+    price = sheet.cell(
+        row=row,
+        column=headers["Amount"]
+    ).value
+
+    return {
+        "order_id": str(order_id).strip(),
+        "sku": str(sku).strip(),
+        "price": float(price),
+    }
+
+
+excel_order = read_first_bq_order(
+    ORDERS_FILE
+)
+
+TEST_ORDER = excel_order["order_id"]
+
+print()
+print("=" * 60)
+print("B&Q EXCEL ORDER")
+print("=" * 60)
+print(
+    f"Order ID:      {excel_order['order_id']}"
+)
+print(
+    f"SKU:           {excel_order['sku']}"
+)
+print(
+    f"Price:         £{excel_order['price']:.2f}"
+)
+print("=" * 60)
+
+input(
+    "\nCheck the Excel order above. "
+    "Press ENTER to continue..."
+)
+
 
 # ============================================================
 # START PLAYWRIGHT
@@ -437,6 +517,47 @@ with sync_playwright() as p:
     )
 
     # ========================================================
+    # SAFETY CHECK 1 - ORDER NUMBER
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("SAFETY CHECK 1 - ORDER NUMBER")
+    print("=" * 60)
+
+    print(
+        f"Excel Order:   {excel_order['order_id']}"
+    )
+
+    print(
+        f"RPii Web Ref:  {web_ref}"
+    )
+
+    if web_ref == excel_order["order_id"]:
+
+        print()
+        print("✓ ORDER NUMBER MATCH")
+
+    else:
+
+        print()
+        print("✗ ORDER NUMBER MISMATCH")
+        print()
+        print(
+            "STOPPING - no further processing will take place."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+
+        raise SystemExit
+
+    
+
+    # ========================================================
     # READ RPii CUSTOMER ACCOUNT
     # ========================================================
 
@@ -464,6 +585,53 @@ with sync_playwright() as p:
     quantity = product["quantity"]
 
     # ========================================================
+        # SAFETY CHECK 2 - SKU
+        # ========================================================
+    
+    print()
+    print("=" * 60)
+    print("SAFETY CHECK 2 - SKU")
+    print("=" * 60)
+
+    excel_sku = str(
+        excel_order["sku"]
+    ).strip().upper()
+
+    rp2_sku = str(
+        sku
+    ).strip().upper()
+
+    print(
+        f"Excel SKU:     {excel_sku}"
+    )
+
+    print(
+        f"RPii SKU:      {rp2_sku}"
+    )
+
+    if excel_sku == rp2_sku:
+
+        print()
+        print("✓ SKU MATCH")
+
+    else:
+
+        print()
+        print("✗ SKU MISMATCH")
+        print()
+        print(
+            "STOPPING - no further processing will take place."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+
+        raise SystemExit
+
+    # ========================================================
     # READ FINANCIALS
     # ========================================================
 
@@ -478,6 +646,55 @@ with sync_playwright() as p:
     balance = sales_frame.locator(
         "#qh_balance"
     ).input_value()
+
+    # ========================================================
+    # SAFETY CHECK 3 - ORDER VALUE
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("SAFETY CHECK 3 - ORDER VALUE")
+    print("=" * 60)
+
+    excel_amount = round(
+        float(excel_order["price"]),
+        2
+    )
+
+    rp2_amount = round(
+        float(total_sale),
+        2
+    )
+
+    print(
+        f"Excel Amount:  £{excel_amount:.2f}"
+    )
+
+    print(
+        f"RPii Total:    £{rp2_amount:.2f}"
+    )
+
+    if excel_amount == rp2_amount:
+
+        print()
+        print("✓ ORDER VALUE MATCH")
+
+    else:
+
+        print()
+        print("✗ ORDER VALUE MISMATCH")
+        print()
+        print(
+            "STOPPING - no further processing will take place."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+
+        raise SystemExit
 
     # ========================================================
     # READ COURIER / DELIVERY INFORMATION
