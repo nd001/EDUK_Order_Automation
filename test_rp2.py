@@ -1928,14 +1928,58 @@ with sync_playwright() as p:
         ):
 
             print()
-            print(
-                "✓ Latest message was sent by the shop."
-            )
 
-            print(
-                "Existing conversation noted - "
-                "continuing normal route."
-            )
+            if str(latest_message["topic_code"]) == "44":
+
+                print(
+                    "⚠ EXISTING DELIVERY MESSAGE FOUND"
+                )
+
+                print()
+                print(
+                    "The latest Mirakl message was sent "
+                    "by the shop using delivery topic 44."
+                )
+
+                print(
+                    "Automatic customer-message processing "
+                    "has been paused to avoid a duplicate."
+                )
+
+                print()
+                print(
+                    f"Latest sender: "
+                    f"{latest_message['sender_name']}"
+                )
+
+                print(
+                    f"Latest date:   "
+                    f"{latest_message['date']}"
+                )
+
+                print()
+                print(
+                    "No new customer message has been sent."
+                )
+
+                input(
+                    "\nReview the existing delivery message. "
+                    "Press ENTER to close..."
+                )
+
+                browser.close()
+                raise SystemExit
+
+            else:
+
+                print(
+                    "✓ Latest message was sent by the shop."
+                )
+
+                print(
+                    "Existing conversation uses a different "
+                    "topic - continuing normal route."
+                )
 
         else:
 
