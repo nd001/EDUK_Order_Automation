@@ -21,10 +21,13 @@ ORDERS_FILE = "orders.xlsx"
 
 WORK_URL = "https://gar.rpdns.co.uk/companyGAR/rp2.cgi"
 REMOTE_URL = "https://garremote.rpdns.co.uk/companyGAR/rp2.cgi"
+INVOICE_FOLDER = r"C:\Users\Noel\Documents\OK TO DELETE"
 
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
+
+INVOICE_FOLDER = r"C:\Users\Noel\Documents\OK TO DELETE"
 
 
 
@@ -58,6 +61,55 @@ else:
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
+
+def read_payment_summary(sales_frame):
+    """
+    Reads the RPii Payment Summary.
+
+    A sale is considered payment-processed if the Payment Summary
+    contains at least one payment row beneath the heading.
+
+    The payment amount itself is NOT used to determine this.
+    PREPAL, for example, may legitimately show 0.00.
+    """
+
+    payment_table = sales_frame.locator("#psum")
+
+    if payment_table.count() == 0:
+        return {
+            "processed": False,
+            "details": None,
+        }
+
+    rows = payment_table.locator("tr")
+
+    payment_details = []
+
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        text = " ".join(
+            row.inner_text().split()
+        )
+
+        # Ignore the heading
+        if not text:
+            continue
+
+        if text.lower() == "payment summary":
+            continue
+
+        payment_details.append(text)
+
+    if payment_details:
+        return {
+            "processed": True,
+            "details": payment_details,
+        }
+
+    return {
+        "processed": False,
+        "details": None,
+    }
 
 def extract_web_ref(text):
     """
@@ -97,6 +149,121 @@ def extract_customer_name(text):
 
     return None
 
+def get_customer_surname(full_name):
+    """
+    Extract a safe surname for use in an invoice filename.
+
+    Example:
+        "mark booth" -> "Booth"
+        "Jackie Jeeves" -> "Jeeves"
+    """
+
+    if not full_name:
+        return "Unknown"
+
+    parts = full_name.strip().split()
+
+    if not parts:
+        return "Unknown"
+
+    surname = parts[-1]
+
+    # Remove characters Windows does not allow in filenames
+    surname = re.sub(
+        r'[<>:"/\\|?*]',
+        '',
+        surname
+    )
+
+    return surname.title()
+
+def extract_delivery_customer(text):
+    """
+    Example RPii text:
+
+    JEEV9737 • Jackie Jeeves •
+    36, Smith Square, Doncaster, DN4 0SR
+    T: 07761022352 • e: ...
+    """
+
+    cleaned = " ".join(text.split())
+
+    parts = [
+        part.strip()
+        for part in cleaned.split("•")
+    ]
+
+    name = None
+    address = None
+    telephone = None
+
+    if len(parts) >= 2:
+        name = parts[1]
+
+    if len(parts) >= 3:
+        address = parts[2]
+
+        # Remove telephone/email text if it has been folded into this part
+        address = re.split(
+            r"\bT:\s*",
+            address
+        )[0].strip()
+
+    tel_match = re.search(
+        r"T:\s*([0-9 ]+)",
+        cleaned
+    )
+
+    if tel_match:
+        telephone = tel_match.group(1).strip()
+
+    return {
+        "name": name,
+        "address": address,
+        "telephone": telephone,
+    }
+
+def extract_uk_postcode(address):
+    """
+    Extract a UK postcode from the end of an address.
+
+    Examples:
+        DN4 0SR
+        BB18 6PZ
+        SW1A 1AA
+    """
+
+    if not address:
+        return None
+
+    match = re.search(
+        r"\b("
+        r"[A-Z]{1,2}\d[A-Z\d]?"
+        r"\s*"
+        r"\d[A-Z]{2}"
+        r")\b",
+        address.upper()
+    )
+
+    if not match:
+        return None
+
+    postcode = match.group(1).replace(" ", "")
+
+    # Standard UK postcode spacing:
+    # everything except last 3 characters + space + last 3
+    return postcode[:-3] + " " + postcode[-3:]
+
+def normalise_phone(number):
+    if not number:
+        return ""
+
+    number = re.sub(r"\D", "", str(number))
+
+    if number.startswith("44"):
+        number = "0" + number[2:]
+
+    return number
 
 def parse_delivery_block(text):
     """
@@ -267,6 +434,9 @@ def read_first_bq_order(filename):
         "Order number",
         "Offer SKU",
         "Amount",
+        "Billing address zip",
+        "Shipping address phone",
+        "Shipping address phone 2",
     ]
 
     for column in required_columns:
@@ -293,16 +463,37 @@ def read_first_bq_order(filename):
         column=headers["Amount"]
     ).value
 
+    postcode = sheet.cell(
+        row=row,
+        column=headers["Billing address zip"]
+    ).value
+
+    phone_1 = sheet.cell(
+        row=row,
+        column=headers["Shipping address phone"]
+    ).value
+
+    phone_2 = sheet.cell(
+    row=row,
+        column=headers["Shipping address phone 2"]
+    ).value
+
     return {
         "order_id": str(order_id).strip(),
         "sku": str(sku).strip(),
         "price": float(price),
+        "postcode": str(postcode).strip(),
+        "phone_1": str(phone_1).strip() if phone_1 else "",
+        "phone_2": str(phone_2).strip() if phone_2 else "",
     }
 
 
 excel_order = read_first_bq_order(
-    ORDERS_FILE
-)
+        ORDERS_FILE
+    )
+
+print("\nEXCEL DEBUG:")
+print(excel_order)
 
 TEST_ORDER = excel_order["order_id"]
 
@@ -502,6 +693,35 @@ with sync_playwright() as p:
     page.wait_for_timeout(1000)
 
     # ========================================================
+    # CUSTOMER PANEL DIAGNOSTIC
+    # ========================================================
+
+    print()
+    print("CUSTOMER PANEL DIAGNOSTIC")
+    print("=" * 70)
+
+    customer_panels = sales_frame.locator(
+        "td.SALES-panel-s"
+    )
+
+    print(
+        f"SALES-panel-s elements found: "
+        f"{customer_panels.count()}"
+    )
+
+    for i in range(customer_panels.count()):
+
+        panel = customer_panels.nth(i)
+
+        print()
+        print(f"PANEL {i}")
+        print("TEXT:")
+        print(repr(panel.inner_text()))
+        print("-" * 50)
+
+    print("=" * 70)
+
+    # ========================================================
     # READ WEB REFERENCE
     # ========================================================
 
@@ -561,10 +781,24 @@ with sync_playwright() as p:
     # READ RPii CUSTOMER ACCOUNT
     # ========================================================
 
-    customer_panel = sales_frame.locator(
-        "td.SALES-panel-s",
-        has_text="•"
-    ).first
+    ccustomer_panels = sales_frame.locator(
+    "td.SALES-panel-s"
+)
+
+    customer_panel = None
+
+    for i in range(customer_panels.count()):
+        panel = customer_panels.nth(i)
+        text = panel.inner_text()
+
+        if "T:" in text:
+            customer_panel = panel
+            break
+
+    if customer_panel is None:
+        raise RuntimeError(
+            "Could not find RPii delivery customer panel."
+        )
 
     customer_text = customer_panel.inner_text()
 
@@ -572,6 +806,71 @@ with sync_playwright() as p:
         customer_text
     )
 
+    # ========================================================
+    # READ DELIVERY CUSTOMER DETAILS
+    # ========================================================
+
+    delivery_customer = extract_delivery_customer(
+        customer_text
+    )
+
+    delivery_postcode = extract_uk_postcode(
+       delivery_customer["address"]
+    )
+
+    # ========================================================
+    # SAFETY CHECK 4 - POSTCODE
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("SAFETY CHECK 4 - POSTCODE")
+    print("=" * 60)
+
+    excel_postcode = (
+        excel_order["postcode"]
+        .replace(" ", "")
+        .upper()
+    )
+
+    rp2_postcode = (
+        delivery_postcode
+        .replace(" ", "")
+        .upper()
+        if delivery_postcode
+        else None
+    )
+
+    print(
+        f"Excel Postcode: {excel_order['postcode']}"
+    )
+
+    print(
+        f"RPii Postcode:  {delivery_postcode}"
+    )
+
+    if rp2_postcode == excel_postcode:
+
+        print()
+        print("✓ POSTCODE MATCH")
+
+    else:
+
+        print()
+        print("✗ POSTCODE MISMATCH")
+        print()
+        print(
+            "STOPPING - no further processing will take place."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+
+        raise SystemExit
+    
     # ========================================================
     # READ ACTIVE PRODUCT
     # ========================================================
@@ -585,8 +884,8 @@ with sync_playwright() as p:
     quantity = product["quantity"]
 
     # ========================================================
-        # SAFETY CHECK 2 - SKU
-        # ========================================================
+    # SAFETY CHECK 2 - SKU
+    # ========================================================
     
     print()
     print("=" * 60)
@@ -646,6 +945,14 @@ with sync_playwright() as p:
     balance = sales_frame.locator(
         "#qh_balance"
     ).input_value()
+
+    # ========================================================
+    # READ PAYMENT SUMMARY
+    # ========================================================
+
+    payment_summary = read_payment_summary(
+        sales_frame
+    )
 
     # ========================================================
     # SAFETY CHECK 3 - ORDER VALUE
@@ -783,6 +1090,28 @@ with sync_playwright() as p:
     courier = delivery["courier"]
 
     # --------------------------------------------------------
+    # Payment reporting
+    # --------------------------------------------------------
+    
+    print()
+    print("PAYMENT SUMMARY")
+    print("-" * 60)
+
+    if payment_summary["processed"]:
+
+        print("Status:        PAYMENT PRESENT")
+
+        for detail in payment_summary["details"]:
+            print(
+                f"Details:       {detail}"
+            )
+
+    else:
+
+        print("Status:        PAYMENT REQUIRED")
+        print("Details:       None")
+
+    # --------------------------------------------------------
     # Courier reporting
     # --------------------------------------------------------
 
@@ -804,6 +1133,221 @@ with sync_playwright() as p:
             f"Courier:       UNKNOWN ({courier})"
         )
 
+    # ========================================================
+    # DETERMINE ORDER ROUTE
+    # ========================================================
+
+    if payment_summary["processed"]:
+        order_route = "READY FOR INVOICE"
+    else:
+        order_route = "WAITING FOR PAYMENT"
+
+    # ========================================================
+    # NORMAL ROUTE - OPEN A4 INVOICE
+    # ========================================================
+
+    if order_route == "READY FOR INVOICE":
+
+        print()
+        print("NORMAL ROUTE")
+        print("=" * 60)
+        print("Order is ready for invoice.")
+
+        # ----------------------------------------------------
+        # Find RPii Print button
+        # ----------------------------------------------------
+
+        print_button = sales_frame.locator(
+            'td.tcbw[onclick^="doPrint("]'
+        )
+
+        if print_button.count() != 1:
+
+            print(
+                f"✗ Expected 1 Print button, "
+                f"found {print_button.count()}."
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        # ----------------------------------------------------
+        # Open Print options
+        # ----------------------------------------------------
+
+        print("Opening RPii Print panel...")
+
+        print_button.evaluate(
+            "element => element.click()"
+        )
+
+        page.wait_for_timeout(1000)
+
+        print("✓ Print panel opened.")
+
+        # ----------------------------------------------------
+        # Find A4 Invoice
+        # ----------------------------------------------------
+
+        a4_invoice = sales_frame.locator(
+            'tr:has-text("A4 Invoice") '
+            'img[onclick^="doInvoiceP("]'
+        )
+
+        if a4_invoice.count() != 1:
+
+            print(
+                f"✗ Expected 1 A4 Invoice option, "
+                f"found {a4_invoice.count()}."
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        # Show us the RPii action for diagnostic purposes
+        invoice_action = a4_invoice.get_attribute(
+            "onclick"
+        )
+
+        print(
+            f"A4 Invoice action: {invoice_action}"
+        )
+
+        # ----------------------------------------------------
+        # Open A4 Invoice
+        # ----------------------------------------------------
+
+        print("Opening A4 Invoice...")
+
+        a4_invoice.evaluate(
+            "element => element.click()"
+        )
+
+        page.wait_for_timeout(1500)
+
+        # ========================================================
+        # SAVE GENERATED INVOICE PDF
+        # ========================================================
+
+        print()
+        print("SAVING INVOICE")
+        print("=" * 60)
+
+        # Find RPii's PRINTFrame
+        print_frame = None
+
+        for frame in page.frames:
+            if frame.name == "PRINTFrame":
+                print_frame = frame
+                break
+
+        if print_frame is None:
+            print("✗ PRINTFrame could not be found.")
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        invoice_url = print_frame.url
+
+        print(
+            f"Invoice URL: {invoice_url}"
+        )
+
+        # Safety check - make sure this really is a PDF
+        if not invoice_url.lower().endswith(".pdf"):
+            print(
+                "✗ PRINTFrame does not contain a PDF."
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        # Make sure invoice folder exists
+        os.makedirs(
+            INVOICE_FOLDER,
+            exist_ok=True
+        )
+
+        # Create invoice filename
+        customer_surname = get_customer_surname(
+            delivery_customer["name"]
+        )
+
+        invoice_filename = (
+            f"{excel_order['order_id']}-"
+            f"{customer_surname}-invoice.pdf"
+        )
+
+        invoice_path = os.path.join(
+            INVOICE_FOLDER,
+            invoice_filename
+        )
+
+        print(
+            f"Saving as: {invoice_filename}"
+        )
+
+        # Download using the authenticated
+        # Playwright browser context
+        response = context.request.get(
+            invoice_url
+        )
+
+        if not response.ok:
+
+            print(
+                f"✗ Invoice download failed. "
+                f"HTTP status: {response.status}"
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        # Save PDF
+        with open(
+            invoice_path,
+            "wb"
+        ) as file:
+
+            file.write(
+                response.body()
+            )
+
+        print()
+        print("✓ INVOICE SAVED SUCCESSFULLY")
+        print()
+        print(
+            f"Saved to: {invoice_path}"
+        )
+
+        input(
+            "\nCheck the saved PDF file. "
+            "Press ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
     # --------------------------------------------------------
     # RPii scheduled date
     # --------------------------------------------------------
@@ -816,6 +1360,95 @@ with sync_playwright() as p:
                 "%d/%m/%Y"
             )
         )
+
+    print()
+    print("DELIVERY CUSTOMER")
+    print("-" * 60)
+
+    print(
+        f"Name:          {delivery_customer['name']}"
+    )
+
+    print(
+        f"Address:       {delivery_customer['address']}"
+    )
+
+    print(
+       f"Postcode:      {delivery_postcode}"
+    )
+
+    print(
+        f"Telephone:     {delivery_customer['telephone']}"
+    )
+
+    print()
+    print("ORDER ROUTE")
+    print("-" * 60)
+    print(f"Route:         {order_route}")
+
+    # ========================================================
+    # SAFETY CHECK 5 - TELEPHONE
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("SAFETY CHECK 5 - TELEPHONE")
+    print("=" * 60)
+
+    excel_phone_1 = normalise_phone(
+        excel_order["phone_1"]
+    )
+
+    excel_phone_2 = normalise_phone(
+        excel_order["phone_2"]
+    )
+
+    rp2_phone = normalise_phone(
+        delivery_customer["telephone"]
+    )
+
+    print(
+        f"Excel Phone 1: {excel_order['phone_1']}"
+    )
+
+    print(
+        f"Excel Phone 2: {excel_order['phone_2']}"
+    )
+
+    print(
+        f"RPii Phone:    {delivery_customer['telephone']}"
+    )
+
+    valid_excel_phones = {
+        phone
+        for phone in (
+            excel_phone_1,
+            excel_phone_2,
+        )
+        if phone
+    }
+
+    if rp2_phone in valid_excel_phones:
+
+        print()
+        print("✓ TELEPHONE MATCH")
+
+    else:
+
+        print()
+        print("✗ TELEPHONE MISMATCH")
+        print()
+        print(
+            "STOPPING - no further processing will take place."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+
+        raise SystemExit
 
     # --------------------------------------------------------
     # Customer-facing date
