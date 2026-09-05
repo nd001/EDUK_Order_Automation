@@ -1,7 +1,10 @@
 import os
 import re
 import requests
+import html
+
 from datetime import datetime, timedelta
+
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -174,6 +177,126 @@ def read_mirakl_order(order_id):
         "order_state": order.get(
             "order_state"
         ),
+    }
+
+def clean_mirakl_message_body(body):
+    """
+    Convert Mirakl's HTML message body into readable
+    plain text for the terminal safety review.
+    """
+
+    if not body:
+        return ""
+
+    text = body
+
+    # Convert common line breaks first
+    text = re.sub(
+        r"<br\s*/?>",
+        "\n",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Remove any remaining HTML tags
+    text = re.sub(
+        r"<[^>]+>",
+        "",
+        text
+    )
+
+    # Decode HTML entities such as &amp;
+    text = html.unescape(text)
+
+    return text.strip()
+
+
+def read_mirakl_threads(order_id):
+    """
+    Read existing Mirakl conversation threads for an order.
+
+    READ ONLY.
+    """
+
+    url = (
+        f"{MIRAKL_BASE_URL.rstrip('/')}"
+        f"/api/inbox/threads"
+    )
+
+    headers = {
+        "Authorization": MIRAKL_API_KEY,
+        "Accept": "application/json",
+    }
+
+    params = {
+        "entity_type": "MMP_ORDER",
+        "entity_id": order_id,
+        "with_messages": "true",
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Mirakl thread lookup failed. "
+            f"HTTP {response.status_code}: "
+            f"{response.text}"
+        )
+
+    data = response.json()
+
+    threads = data.get(
+        "data",
+        []
+    )
+
+    all_messages = []
+
+    for thread in threads:
+
+        topic = thread.get(
+            "topic",
+            {}
+        )
+
+        for message in thread.get(
+            "messages",
+            []
+        ):
+
+            sender = message.get(
+                "from",
+                {}
+            )
+
+            all_messages.append(
+                {
+                    "thread_id": thread.get("id"),
+                    "topic_type": topic.get("type"),
+                    "topic_code": topic.get("value"),
+                    "message_id": message.get("id"),
+                    "date": message.get("date_created"),
+                    "sender_type": sender.get("type"),
+                    "sender_name": sender.get("display_name"),
+                    "body": clean_mirakl_message_body(
+                        message.get("body")
+                    ),
+                }
+            )
+
+    # ISO Mirakl timestamps sort correctly as strings.
+    all_messages.sort(
+        key=lambda message: message["date"] or ""
+    )
+
+    return {
+        "threads": threads,
+        "messages": all_messages,
     }
 
 def read_payment_summary(sales_frame):
@@ -1693,6 +1816,155 @@ with sync_playwright() as p:
     print(
         "Excel, RPii and Mirakl agree."
     )
+
+        # ========================================================
+    # MIRAKL CUSTOMER COMMUNICATION SAFETY CHECK
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("MIRAKL COMMUNICATION SAFETY CHECK")
+    print("=" * 60)
+
+    mirakl_threads = read_mirakl_threads(
+        excel_order["order_id"]
+    )
+
+    existing_messages = mirakl_threads[
+        "messages"
+    ]
+
+    if not existing_messages:
+
+        print("No existing customer messages found.")
+        print()
+        print("✓ CLEAR TO CONTINUE")
+
+    else:
+
+        first_message = existing_messages[0]
+        latest_message = existing_messages[-1]
+
+        print(
+            f"Existing messages: {len(existing_messages)}"
+        )
+
+        print(
+            f"Conversation started by: "
+            f"{first_message['sender_type']}"
+        )
+
+        print(
+            f"Latest message from:      "
+            f"{latest_message['sender_type']}"
+        )
+
+        print(
+            f"Latest sender:            "
+            f"{latest_message['sender_name']}"
+        )
+
+        print(
+            f"Latest message date:      "
+            f"{latest_message['date']}"
+        )
+
+        print(
+            f"Topic code:               "
+            f"{latest_message['topic_code']}"
+        )
+
+        print()
+        print("LATEST MESSAGE")
+        print("-" * 60)
+
+        print(
+            latest_message["body"]
+        )
+
+        print("-" * 60)
+
+        # ----------------------------------------------------
+        # CUSTOMER MESSAGE = HARD PAUSE
+        # ----------------------------------------------------
+
+        if latest_message["sender_type"] in (
+            "CUSTOMER",
+            "CUSTOMER_USER",
+        ):
+
+            print()
+            print(
+                "⚠ CUSTOMER MESSAGE REQUIRES REVIEW"
+            )
+
+            print()
+            print(
+                "The customer is currently the latest "
+                "person to have messaged."
+            )
+
+            print(
+                "Automatic invoice/message processing "
+                "has been paused."
+            )
+
+            print()
+            print(
+                "No customer message has been sent."
+            )
+
+            input(
+                "\nReview the customer's message. "
+                "Press ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        elif latest_message["sender_type"] in (
+            "SHOP",
+            "SHOP_USER",
+        ):
+
+            print()
+            print(
+                "✓ Latest message was sent by the shop."
+            )
+
+            print(
+                "Existing conversation noted - "
+                "continuing normal route."
+            )
+
+        else:
+
+            print()
+            print(
+                "⚠ UNKNOWN MIRAKL SENDER TYPE"
+            )
+
+            print(
+                f"Sender type: "
+                f"{latest_message['sender_type']}"
+            )
+
+            print()
+            print(
+                "STOPPING - sender could not be "
+                "safely classified."
+            )
+
+            print(
+                "No customer message has been sent."
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
 
     # ========================================================
     # DETERMINE ORDER ROUTE
