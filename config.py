@@ -107,3 +107,12 @@ if not MIRAKL_API_KEY:
 # ============================================================
 
 DIY_DELIVERY_TOPIC_CODE = "44"
+
+LIVE_MIRAKL_SEND_ENABLED = False    
+
+DIY_DIRECT_DELIVERY_CARRIER_CODE = "DIR"
+
+DIY_DIRECT_DELIVERY_CARRIER_LABEL = (
+    "The verified seller will contact you directly "
+    "to plan a delivery"
+)

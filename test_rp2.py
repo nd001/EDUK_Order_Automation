@@ -1,5 +1,6 @@
 import os
 import re
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -20,6 +21,9 @@ from marketplaces.diy import (
     read_mirakl_order,
     read_mirakl_threads,
     build_mirakl_dry_run_payload,
+    send_mirakl_delivery_message,
+    build_mirakl_shipping_dry_run,
+    ship_mirakl_order,
 )
 
 from messaging import (
@@ -49,6 +53,10 @@ from validation import (
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
+
+# Live Mirakl writes are enabled only after all safety gates pass.
+# The operator must still type the exact SEND <order_id> confirmation.
+LIVE_MIRAKL_SEND_ENABLED = True
 
 
 
@@ -84,6 +92,358 @@ def get_customer_surname(full_name):
     )
 
     return surname.title()
+
+
+def complete_mirakl_shipping(
+    browser,
+    marketplace_order,
+    mirakl_order,
+):
+    """
+    Complete the controlled Mirakl shipping flow for one order.
+
+    Safety design:
+    - Build/display a dry run first.
+    - Require exact SHIP <order_id> confirmation.
+    - Perform exactly one shipment PUT request.
+    - Never automatically retry a shipment write.
+    - Read the order back and verify SHIPPED state.
+    """
+
+    shipping_dry_run = build_mirakl_shipping_dry_run(
+        mirakl_order
+    )
+
+    print()
+    print("=" * 60)
+    print("MIRAKL SHIPPING - DRY RUN")
+    print("=" * 60)
+
+    print(
+        f"Order:          "
+        f"{shipping_dry_run['order_id']}"
+    )
+
+    print(
+        f"Current State:  "
+        f"{shipping_dry_run['current_state']}"
+    )
+
+    print(
+        f"Target State:   "
+        f"{shipping_dry_run['target_state']}"
+    )
+
+    print(
+        f"Endpoint:       "
+        f"{shipping_dry_run['endpoint']}"
+    )
+
+    print(
+        f"Tracking Number: "
+        f"{shipping_dry_run['tracking_number']}"
+    )
+
+    print(
+        f"Carrier Code:    "
+        f"{shipping_dry_run['carrier_code']}"
+    )
+
+    print(
+        f"Carrier:         "
+        f"{shipping_dry_run['carrier_label']}"
+    )
+
+    print()
+    print("NO SHIPPING API WRITE HAS BEEN MADE.")
+
+    # --------------------------------------------------------
+    # Shipping dry-run safety checks
+    # --------------------------------------------------------
+
+    shipping_failures = []
+
+    if (
+        shipping_dry_run["order_id"]
+        != marketplace_order.order_id
+    ):
+        shipping_failures.append(
+            "Shipping order number mismatch"
+        )
+
+    if shipping_dry_run["current_state"] != "SHIPPING":
+        shipping_failures.append(
+            "Mirakl order is not in SHIPPING state"
+        )
+
+    if shipping_dry_run["target_state"] != "SHIPPED":
+        shipping_failures.append(
+            "Unexpected target shipping state"
+        )
+
+    if shipping_failures:
+
+        print()
+        print("✗ SHIPPING SAFETY CHECK FAILED")
+
+        for failure in shipping_failures:
+            print(f"✗ {failure}")
+
+        print()
+        print("NO SHIPPING API WRITE HAS BEEN MADE.")
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    # ========================================================
+    # FINAL MIRAKL SHIPPING GATE
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("FINAL MIRAKL SHIPPING CONFIRMATION")
+    print("=" * 60)
+
+    print(
+        f"Order:          "
+        f"{marketplace_order.order_id}"
+    )
+
+    print(
+        f"Current State:  "
+        f"{shipping_dry_run['current_state']}"
+    )
+
+    print(
+        f"Target State:   "
+        f"{shipping_dry_run['target_state']}"
+    )
+
+    expected_confirmation = (
+        f"SHIP {marketplace_order.order_id}"
+    )
+
+    print()
+    print("=" * 60)
+    print("WARNING: THIS WILL MARK THE ORDER AS SHIPPED")
+    print("=" * 60)
+
+    print()
+    print("To authorise this exact order, type:")
+    print()
+    print(expected_confirmation)
+
+    confirmation = input(
+        "\nFinal shipping confirmation: "
+    ).strip()
+
+    if confirmation != expected_confirmation:
+
+        print()
+        print("✗ SHIPPING NOT AUTHORISED")
+
+        print()
+        print(
+            "The confirmation did not exactly match:"
+        )
+        print(expected_confirmation)
+
+        print()
+        print("NO SHIPPING API WRITE HAS BEEN MADE.")
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    print()
+    print("✓ SHIPPING AUTHORISATION ACCEPTED")
+
+    # ========================================================
+    # LIVE MIRAKL SHIP
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("LIVE MIRAKL SHIPPING")
+    print("=" * 60)
+
+    ship_result = ship_mirakl_order(
+        order_id=marketplace_order.order_id,
+        carrier_code=shipping_dry_run[
+            "carrier_code"
+        ],
+        carrier_name=shipping_dry_run[
+            "carrier_label"
+        ],
+        tracking_number=shipping_dry_run[
+            "tracking_number"
+        ],
+    )
+
+    print()
+    print("✓ MIRAKL SHIP REQUEST COMPLETED")
+    print(
+        f"Tracking update HTTP: "
+        f"{ship_result['tracking_status_code']}"
+    )
+
+    print(
+        f"Ship HTTP:            "
+        f"{ship_result['ship_status_code']}"
+    )
+
+    # ========================================================
+    # POST-SHIP MIRAKL VERIFICATION
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("POST-SHIP MIRAKL VERIFICATION")
+    print("=" * 60)
+
+    print()
+    print(
+        "Reading the order back from Mirakl..."
+    )
+
+    time.sleep(1)
+
+    verified_order = read_mirakl_order(
+        marketplace_order.order_id
+    )
+
+    verified_state = verified_order.get(
+        "order_state"
+    )
+
+    verified_carrier = verified_order.get(
+        "shipping_carrier_code"
+    )
+
+    verified_tracking = verified_order.get(
+        "shipping_tracking"
+    )
+
+    expected_tracking = (
+        marketplace_order.order_id
+    )
+
+    expected_carrier = "DIR"
+
+    print()
+    print(
+        f"Mirakl State:     {verified_state}"
+    )
+
+    print(
+        f"Carrier Code:     {verified_carrier}"
+    )
+
+    print(
+        f"Tracking Number:  {verified_tracking}"
+    )
+
+    print()
+    print("-" * 60)
+
+    verification_passed = True
+
+    valid_post_ship_states = {
+        "SHIPPED",
+        "WAITING_DEBIT",
+    }
+
+    if verified_state in valid_post_ship_states:
+        print(
+            f"✓ Order has advanced to valid "
+            f"post-shipment state: {verified_state}"
+        )
+    else:
+        print(
+            f"✗ Unexpected post-shipment state: "
+            f"{verified_state}"
+        )
+        verification_passed = False
+
+        if verified_carrier == expected_carrier:
+            print(
+                "✓ Carrier code is DIR"
+            )
+        else:
+            print(
+                f"✗ Carrier code mismatch "
+                f"(expected {expected_carrier})"
+            )
+            verification_passed = False
+
+    if verified_tracking == expected_tracking:
+        print(
+            "✓ Tracking number matches order number"
+        )
+    else:
+        print(
+            "✗ Tracking number mismatch "
+            f"(expected {expected_tracking})"
+        )
+        verification_passed = False
+
+    print("-" * 60)
+
+    if not verification_passed:
+
+        print()
+        print("=" * 60)
+        print("⚠ POST-SHIP VERIFICATION FAILED")
+        print("=" * 60)
+
+        print()
+        print(
+            "A Mirakl write may already have occurred."
+        )
+
+        print(
+            "DO NOT automatically retry it."
+        )
+
+        print()
+        print(
+            "Check this order manually in Mirakl."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    print()
+    print("✓ POST-SHIP VERIFICATION PASSED")
+
+    print()
+    print("=" * 60)
+    print("✓ MIRAKL SHIPMENT VERIFIED")
+    print("=" * 60)
+
+    print()
+    print(
+        f"Order {marketplace_order.order_id} "
+        "is complete."
+    )
+
+    input(
+        "\nPress ENTER to close..."
+    )
+
+    browser.close()
+    raise SystemExit
 
 
 marketplace = DIYMarketplaceAdapter(
@@ -936,7 +1296,7 @@ with sync_playwright() as p:
         print("=" * 60)
 
         print(
-            "Excel SKU:     ",
+            "Marketplace SKU: ",
             excel_sku
         )
 
@@ -983,7 +1343,7 @@ with sync_playwright() as p:
 
             print(
                 "Continuing using the "
-                "Excel/RPii SKU."
+                "Marketplace/RPii SKU."
             )
 
         else:
@@ -1068,6 +1428,8 @@ with sync_playwright() as p:
         print(
             "Marketplace, RPii and Mirakl agree."
         )
+
+    customer_message_already_sent = False
 
     # ========================================================
     # MIRAKL CUSTOMER COMMUNICATION SAFETY CHECK
@@ -1181,7 +1543,10 @@ with sync_playwright() as p:
 
             print()
 
-            if str(latest_message["topic_code"]) == DIY_DELIVERY_TOPIC_CODE:
+            if (
+                str(latest_message["topic_code"])
+                == str(DIY_DELIVERY_TOPIC_CODE)
+            ):
 
                 print(
                     "⚠ EXISTING DELIVERY MESSAGE FOUND"
@@ -1193,9 +1558,14 @@ with sync_playwright() as p:
                     "by the shop using delivery topic 44."
                 )
 
+                print()
                 print(
-                    "Automatic customer-message processing "
-                    "has been paused to avoid a duplicate."
+                    "✓ DUPLICATE MESSAGE PROTECTION ACTIVE"
+                )
+
+                print(
+                    "The customer-message stage will be "
+                    "skipped for this order."
                 )
 
                 print()
@@ -1209,18 +1579,7 @@ with sync_playwright() as p:
                     f"{latest_message['date']}"
                 )
 
-                print()
-                print(
-                    "No new customer message has been sent."
-                )
-
-                input(
-                    "\nReview the existing delivery message. "
-                    "Press ENTER to close..."
-                )
-
-                browser.close()
-                raise SystemExit
+                customer_message_already_sent = True
 
             else:
 
@@ -1294,6 +1653,39 @@ with sync_playwright() as p:
 
         browser.close()
         raise SystemExit
+
+    # ========================================================
+    # EXISTING DELIVERY MESSAGE - CONTINUE TO SHIPPING
+    # ========================================================
+
+    if customer_message_already_sent:
+
+        print()
+        print("=" * 60)
+        print("CUSTOMER MESSAGE ALREADY COMPLETE")
+        print("=" * 60)
+
+        print(
+            f"Order:       "
+            f"{marketplace_order.order_id}"
+        )
+
+        print(
+            "Message:     Existing delivery "
+            "message found in Mirakl"
+        )
+
+        print()
+        print(
+            "No invoice/customer message will "
+            "be generated or sent again."
+        )
+
+        complete_mirakl_shipping(
+            browser=browser,
+            marketplace_order=marketplace_order,
+            mirakl_order=mirakl_order,
+        )
 
     # ========================================================
     # NORMAL ROUTE - OPEN A4 INVOICE
@@ -1585,7 +1977,7 @@ with sync_playwright() as p:
     print(customer_message)
     print()
 
-        # ========================================================
+    # ========================================================
     # MIRAKL SEND PAYLOAD - DRY RUN ONLY
     # ========================================================
 
@@ -1652,6 +2044,7 @@ with sync_playwright() as p:
 
     print("-" * 60)
 
+    
     # --------------------------------------------------------
     # DRY-RUN SAFETY VALIDATION
     # --------------------------------------------------------
@@ -1715,6 +2108,16 @@ with sync_playwright() as p:
             "NOT be permitted."
         )
 
+        print()
+        print("STOPPING - live send gate will not be reached.")
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
     else:
 
         print(
@@ -1746,145 +2149,311 @@ with sync_playwright() as p:
     print()
     print("NOTHING HAS BEEN SENT.")
 
-    # --------------------------------------------------------
-    # RPii scheduled date
-    # --------------------------------------------------------
-
-    if delivery["rp2_date"]:
-
-        print(
-            "RPii Date:      "
-            + delivery["rp2_date"].strftime(
-                "%d/%m/%Y"
-            )
-        )
+    # ============================================================
+    # FINAL MIRAKL LIVE-SEND GATE
+    # ============================================================
 
     print()
-    print("DELIVERY CUSTOMER")
-    print("-" * 60)
-
-    print(
-        f"Name:          {delivery_customer['name']}"
-    )
-
-    print(
-        f"Address:       {delivery_customer['address']}"
-    )
-
-    print(
-       f"Postcode:      {delivery_postcode}"
-    )
-
-    print(
-        f"Telephone:     {delivery_customer['telephone']}"
-    )
-
-    print()
-    print("ORDER ROUTE")
-    print("-" * 60)
-    print(f"Route:         {order_route}")
-
-    # --------------------------------------------------------
-    # Customer-facing date
-    # --------------------------------------------------------
-
-    if delivery["customer_date"]:
-
-        if courier == "SK":
-
-            print(
-                "Collection:     "
-                + delivery[
-                    "customer_date"
-                ].strftime(
-                    "%d/%m/%Y"
-                )
-            )
-
-        elif courier == "ED":
-
-            print(
-                "Delivery Date:  "
-                + delivery[
-                    "customer_date"
-                ].strftime(
-                    "%d/%m/%Y"
-                )
-            )
-
-            print(
-                "                "
-                "(RPii date minus 1 day)"
-            )
-
-    # --------------------------------------------------------
-    # AM / PM
-    # --------------------------------------------------------
-
-    if delivery["slot"]:
-
-        print(
-            f"Slot:          "
-            f"{delivery['slot']}"
-        )
-
+    print("=" * 60)
+    print("FINAL MIRAKL SEND CONFIRMATION")
     print("=" * 60)
 
+    print(f"Marketplace:    {marketplace_order.marketplace}")
+    print(f"Order:          {marketplace_order.order_id}")
+    print(f"Customer:       {delivery_customer['name']}")
+    print(
+        "Topic:          "
+        "Information about delivery (incl. tracking)"
+    )
+    print("Topic Code:     44")
+    print(f"Attachment:     {invoice_filename}")
+
+    print()
+    print("✓ Marketplace/RPii/Mirakl validation passed")
+    print("✓ Communication safety check passed")
+    print("✓ Invoice attachment exists")
+    print("✓ Dry-run payload validation passed")
+
+    if override_used:
+        print(
+            "⚠ Manual SKU override was used for this order"
+        )
+
+    print()
+    print("=" * 60)
+    print("WARNING: THIS IS THE FINAL CUSTOMER SEND GATE")
+    print("=" * 60)
+
+    print()
+    print(
+        "The next stage will send this message "
+        "to the customer through Mirakl."
+    )
+
+    print()
+    print(
+        "To authorise this exact order, type:"
+    )
+
+    expected_confirmation = (
+        f"SEND {marketplace_order.order_id}"
+    )
+
+    print()
+    print(expected_confirmation)
+    print()
+
+    confirmation = input(
+        "Final confirmation: "
+    ).strip()
+
+    if confirmation != expected_confirmation:
+
+        print()
+        print("✗ LIVE SEND NOT AUTHORISED")
+        print()
+        print(
+            "The confirmation did not exactly match:"
+        )
+        print(expected_confirmation)
+
+        print()
+        print("No Mirakl message has been sent.")
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+
+    print()
+    print("✓ LIVE SEND AUTHORISATION ACCEPTED")
+    print()
+    print(
+        f"Order {marketplace_order.order_id} "
+        "has passed the final operator gate."
+    )
+
     # ========================================================
-    # BASIC SAFETY CHECK
+    # LIVE MIRAKL SEND
+    # ========================================================
+
+    if not LIVE_MIRAKL_SEND_ENABLED:
+
+        print()
+        print("=" * 60)
+        print("LIVE API WRITE DISABLED")
+        print("=" * 60)
+
+        print()
+        print(
+            "Final operator authorisation passed, "
+            "but LIVE_MIRAKL_SEND_ENABLED is False."
+        )
+
+        print()
+        print(
+            "NO CUSTOMER MESSAGE HAS BEEN SENT."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    # --------------------------------------------------------
+    # LIVE SEND
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 60)
+    print("LIVE MIRAKL SEND")
+    print("=" * 60)
+
+    send_result = send_mirakl_delivery_message(
+        order_id=marketplace_order.order_id,
+        message_body=customer_message,
+        invoice_path=invoice_path,
+    )
+
+    print()
+    print("✓ MIRAKL SEND REQUEST COMPLETED")
+
+    print(
+        f"HTTP Status: "
+        f"{send_result['status_code']}"
+    )
+
+    # ========================================================
+    # POST-SEND MIRAKL VERIFICATION
     # ========================================================
 
     print()
-    print("SAFETY CHECK")
-    print("-" * 60)
+    print("=" * 60)
+    print("POST-SEND MIRAKL VERIFICATION")
+    print("=" * 60)
 
-    if web_ref == TEST_ORDER:
+    print()
+    print(
+        "Waiting briefly for Mirakl to register "
+        "the new message..."
+    )
 
-        print(
-            "✓ Web Ref matches requested order."
-        )
-
-    else:
-
-        print(
-            "✗ WARNING: Web Ref does NOT match "
-            "requested order."
-        )
-
-    if sku:
-
-        print(
-            f"✓ Active product found: {sku}"
-        )
-
-    else:
-
-        print(
-            "✗ WARNING: No active product "
-            "could be identified."
-        )
-
-    if courier in ("SK", "ED"):
-
-        print(
-            "✓ Recognised delivery method."
-        )
-
-    else:
-
-        print(
-            "⚠ Delivery method not recognised."
-        )
-
-    print("-" * 60)
+    time.sleep(2)
 
     print(
-        "\nSAFE TEST MODE: "
-        "No Mirakl customer message has been sent."
+        "Reading the Mirakl conversation back "
+        "to verify the customer message..."
+    )
+
+    verification_threads = read_mirakl_threads(
+        marketplace_order.order_id
+    )
+
+    verification_messages = verification_threads[
+        "messages"
+    ]
+
+    if not verification_messages:
+
+        print()
+        print("✗ POST-SEND VERIFICATION FAILED")
+        print()
+        print(
+            "Mirakl returned no messages after the send."
+        )
+
+        print()
+        print(
+            "IMPORTANT: The API send request was made, "
+            "so do NOT automatically retry."
+        )
+
+        input(
+            "\nCheck the order manually in Mirakl. "
+            "Press ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    latest_message = verification_messages[-1]
+
+    verification_failures = []
+
+    # --------------------------------------------------------
+    # Sender
+    # --------------------------------------------------------
+
+    if latest_message["sender_type"] not in (
+        "SHOP",
+        "SHOP_USER",
+    ):
+        verification_failures.append(
+            "Latest message was not sent by the shop"
+        )
+
+    # --------------------------------------------------------
+    # Topic
+    # --------------------------------------------------------
+
+    if (
+        str(latest_message["topic_code"])
+        != str(DIY_DELIVERY_TOPIC_CODE)
+    ):
+        verification_failures.append(
+            "Latest message does not use delivery topic 44"
+        )
+
+    # --------------------------------------------------------
+    # Message body
+    # --------------------------------------------------------
+
+    expected_body = customer_message.strip()
+
+    actual_body = (
+        latest_message["body"] or ""
+    ).strip()
+
+    if actual_body != expected_body:
+        verification_failures.append(
+            "Latest Mirakl message body does not match "
+            "the message that was sent"
+        )
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
+
+    if verification_failures:
+
+        print()
+        print("✗ POST-SEND VERIFICATION FAILED")
+        print()
+
+        for failure in verification_failures:
+            print(
+                f"✗ {failure}"
+            )
+
+        print()
+        print(
+            "IMPORTANT: The API send request was already made."
+        )
+
+        print(
+            "Do NOT automatically retry this order."
+        )
+
+        print()
+        print(
+            "Check the Mirakl conversation manually."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    print()
+    print("✓ POST-SEND VERIFICATION PASSED")
+    print()
+    print(
+        f"Order:      {marketplace_order.order_id}"
+    )
+    print(
+        f"Sender:     {latest_message['sender_name']}"
+    )
+    print(
+        f"Topic Code: {latest_message['topic_code']}"
+    )
+    print(
+        f"Date:       {latest_message['date']}"
+    )
+
+    print()
+    print("=" * 60)
+    print("✓ CUSTOMER MESSAGE VERIFIED IN MIRAKL")
+    print("=" * 60)
+
+    print()
+    print(
+        "The message was sent and has been "
+        "read back successfully from Mirakl."
     )
 
     input(
         "\nPress ENTER to close..."
     )
 
-    browser.close() 
+    complete_mirakl_shipping(
+        browser=browser,
+        marketplace_order=marketplace_order,
+        mirakl_order=mirakl_order,
+    )

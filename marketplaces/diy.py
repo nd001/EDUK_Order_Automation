@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import json
 
 import requests
 from openpyxl import load_workbook
@@ -13,6 +14,13 @@ from config import (
 
 from models import MarketplaceOrder
 from marketplaces.base import MarketplaceAdapter
+
+DIY_DIRECT_DELIVERY_CARRIER_CODE = "DIR"
+
+DIY_DIRECT_DELIVERY_CARRIER_LABEL = (
+    "The verified seller will contact you directly "
+    "to plan a delivery"
+)
 
 # ============================================================
 # DIY / B&Q EXCEL IMPORT
@@ -225,6 +233,12 @@ def read_mirakl_order(order_id):
         "order_state": order.get(
             "order_state"
         ),
+        "shipping_carrier_code": order.get(
+            "shipping_carrier_code"
+        ),
+        "shipping_tracking": order.get(
+            "shipping_tracking"
+        ),
     }
 
 
@@ -419,6 +433,246 @@ def build_mirakl_dry_run_payload(
                 invoice_path
             ),
         },
+    }
+
+def format_mirakl_message_html(message_body):
+    """
+    Convert our plain-text customer message into safe HTML
+    for Mirakl while preserving line breaks and paragraphs.
+    """
+
+    if not message_body:
+        return ""
+
+    # Escape customer/order text so characters such as
+    # <, > and & cannot accidentally become HTML.
+    safe_body = html.escape(
+        message_body
+    )
+
+    # Mirakl renders the message body as HTML, so normal
+    # newline characters need explicit HTML line breaks.
+    safe_body = safe_body.replace(
+        "\n",
+        "<br />"
+    )
+
+    return safe_body
+
+def build_mirakl_shipping_dry_run(
+    mirakl_order,
+):
+    """
+    Build a local representation of the proposed
+    Mirakl shipping action.
+
+    NO network write occurs here.
+    """
+
+    order_id = mirakl_order["order_id"]
+
+    return {
+        "mode": "DRY_RUN",
+        "order_id": order_id,
+        "current_state": mirakl_order["order_state"],
+        "target_state": "SHIPPED",
+
+        "tracking_number": order_id,
+
+        "carrier_code": (
+            DIY_DIRECT_DELIVERY_CARRIER_CODE
+        ),
+
+        "carrier_label": (
+            DIY_DIRECT_DELIVERY_CARRIER_LABEL
+        ),
+
+        "endpoint": (
+            f"/api/orders/"
+            f"{order_id}/ship"
+        ),
+    }
+
+def ship_mirakl_order(
+    order_id,
+    carrier_code,
+    carrier_name,
+    tracking_number,
+):
+    """
+    Set tracking/carrier details, then validate shipment.
+
+    IMPORTANT:
+    Two PUT requests are made:
+    1. Update tracking/carrier
+    2. Mark order as shipped
+
+    There is deliberately NO automatic retry.
+    """
+
+    headers = {
+        "Authorization": MIRAKL_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # --------------------------------------------------------
+    # STEP 1 - UPDATE TRACKING / CARRIER
+    # --------------------------------------------------------
+
+    tracking_url = (
+        f"{MIRAKL_BASE_URL.rstrip('/')}"
+        f"/api/orders/{order_id}/tracking"
+    )
+
+    tracking_payload = {
+        "carrier_code": carrier_code,
+        "carrier_name": carrier_name,
+        "tracking_number": tracking_number,
+    }
+
+    tracking_response = requests.put(
+        tracking_url,
+        headers=headers,
+        json=tracking_payload,
+        timeout=30,
+    )
+
+    if not tracking_response.ok:
+
+        raise RuntimeError(
+            f"Mirakl tracking update failed. "
+            f"HTTP {tracking_response.status_code}: "
+            f"{tracking_response.text}"
+        )
+
+    # --------------------------------------------------------
+    # STEP 2 - MARK ORDER AS SHIPPED
+    # --------------------------------------------------------
+
+    ship_url = (
+        f"{MIRAKL_BASE_URL.rstrip('/')}"
+        f"/api/orders/{order_id}/ship"
+    )
+
+    ship_response = requests.put(
+        ship_url,
+        headers=headers,
+        timeout=30,
+    )
+
+    if not ship_response.ok:
+
+        raise RuntimeError(
+            f"Mirakl ship request failed. "
+            f"HTTP {ship_response.status_code}: "
+            f"{ship_response.text}"
+        )
+
+    return {
+        "success": True,
+        "tracking_status_code": (
+            tracking_response.status_code
+        ),
+        "ship_status_code": (
+            ship_response.status_code
+        ),
+        "tracking_response_text": (
+            tracking_response.text
+        ),
+        "ship_response_text": (
+            ship_response.text
+        ),
+    }
+
+def send_mirakl_delivery_message(
+    order_id,
+    message_body,
+    invoice_path,
+):
+    """
+    Send one delivery-information thread to the customer
+    through Mirakl.
+
+    IMPORTANT:
+    This performs ONE POST request only.
+    There is deliberately NO automatic retry.
+    """
+
+    url = (
+        f"{MIRAKL_BASE_URL.rstrip('/')}"
+        f"/api/orders/{order_id}/threads"
+    )
+
+    headers = {
+        "Authorization": MIRAKL_API_KEY,
+        "Accept": "application/json",
+    }
+
+    formatted_message_body = format_mirakl_message_html(
+    message_body
+)
+
+    thread_input = {
+        "body": formatted_message_body,
+        "topic": {
+            "type": "REASON_CODE",
+            "value": DIY_DELIVERY_TOPIC_CODE,
+        },
+        "to": [
+            "CUSTOMER",
+        ],
+    }
+
+    if not os.path.isfile(invoice_path):
+        raise RuntimeError(
+            f"Invoice attachment does not exist: "
+            f"{invoice_path}"
+        )
+
+    with open(invoice_path, "rb") as invoice_file:
+
+        files = {
+            "files": (
+                os.path.basename(invoice_path),
+                invoice_file,
+                "application/pdf",
+            ),
+
+            "thread_input": (
+                None,
+                json.dumps(thread_input),
+                "application/json",
+            ),
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            files=files,
+            timeout=30,
+        )
+
+    if not response.ok:
+
+        raise RuntimeError(
+            f"Mirakl message send failed. "
+            f"HTTP {response.status_code}: "
+            f"{response.text}"
+        )
+
+    try:
+        response_data = response.json()
+
+    except ValueError:
+        response_data = {
+            "raw_response": response.text
+        }
+
+    return {
+        "success": True,
+        "status_code": response.status_code,
+        "response": response_data,
     }
 
 class DIYMarketplaceAdapter(MarketplaceAdapter):
