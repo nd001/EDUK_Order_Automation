@@ -12,7 +12,7 @@ from config import (
 )
 
 from models import MarketplaceOrder
-
+from marketplaces.base import MarketplaceAdapter
 
 # ============================================================
 # DIY / B&Q EXCEL IMPORT
@@ -420,3 +420,20 @@ def build_mirakl_dry_run_payload(
             ),
         },
     }
+
+class DIYMarketplaceAdapter(MarketplaceAdapter):
+    """
+    DIY / B&Q marketplace adapter.
+    """
+
+    def __init__(self, orders_file):
+        self.orders_file = orders_file
+
+    @property
+    def name(self) -> str:
+        return "DIY"
+
+    def read_first_order(self) -> MarketplaceOrder:
+        return read_first_bq_order(
+            self.orders_file
+        )

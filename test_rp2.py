@@ -16,7 +16,7 @@ from config import (
 )
 
 from marketplaces.diy import (
-    read_first_bq_order,
+    DIYMarketplaceAdapter,
     read_mirakl_order,
     read_mirakl_threads,
     build_mirakl_dry_run_payload,
@@ -86,9 +86,18 @@ def get_customer_surname(full_name):
     return surname.title()
 
 
-excel_order = read_first_bq_order(
-        ORDERS_FILE
-    )
+marketplace = DIYMarketplaceAdapter(
+    ORDERS_FILE
+)
+
+excel_order = marketplace.read_first_order()
+
+print()
+print("MARKETPLACE ADAPTER")
+print("=" * 60)
+print(f"Marketplace: {marketplace.name}")
+print(f"Order type:  {type(excel_order).__name__}")
+print("=" * 60)
 
 print("\nEXCEL DEBUG:")
 print(excel_order)
