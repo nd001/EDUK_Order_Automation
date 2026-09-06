@@ -97,7 +97,7 @@ def build_three_way_safety_result(
     # --------------------------------------------------------
 
     excel_order_id = str(
-        excel_order.get("order_id") or ""
+        excel_order.order_id or ""
     ).strip()
 
     rp2_order_id = str(
@@ -122,7 +122,7 @@ def build_three_way_safety_result(
     # --------------------------------------------------------
 
     excel_sku = normalise_sku(
-        excel_order.get("sku")
+        excel_order.sku
     )
 
     rp2_sku = normalise_sku(
@@ -147,7 +147,7 @@ def build_three_way_safety_result(
     # --------------------------------------------------------
 
     excel_price = normalise_price(
-        excel_order.get("price", 0)
+        excel_order.price
     )
 
     rp2_price = normalise_price(
@@ -172,7 +172,7 @@ def build_three_way_safety_result(
     # --------------------------------------------------------
 
     excel_postcode = normalise_postcode(
-        excel_order.get("postcode")
+        excel_order.postcode
     )
 
     rp2_postcode = normalise_postcode(
@@ -198,10 +198,10 @@ def build_three_way_safety_result(
 
     excel_phones = {
         normalise_phone(
-            excel_order.get("phone_1")
+            excel_order.phone_1
         ),
         normalise_phone(
-            excel_order.get("phone_2")
+            excel_order.phone_2
         ),
     }
 

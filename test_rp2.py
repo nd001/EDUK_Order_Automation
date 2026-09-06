@@ -93,20 +93,20 @@ excel_order = read_first_bq_order(
 print("\nEXCEL DEBUG:")
 print(excel_order)
 
-TEST_ORDER = excel_order["order_id"]
+TEST_ORDER = excel_order.order_id
 
 print()
 print("=" * 60)
 print("B&Q EXCEL ORDER")
 print("=" * 60)
 print(
-    f"Order ID:      {excel_order['order_id']}"
+    f"Order ID:      {excel_order.order_id}"
 )
 print(
-    f"SKU:           {excel_order['sku']}"
+    f"SKU:           {excel_order.sku}"
 )
 print(
-    f"Price:         £{excel_order['price']:.2f}"
+    f"Price:         £{excel_order.price:.2f}"
 )
 print("=" * 60)
 
@@ -344,14 +344,14 @@ with sync_playwright() as p:
     print("=" * 60)
 
     print(
-        f"Excel Order:   {excel_order['order_id']}"
+        f"Excel Order:   {excel_order.order_id}"
     )
 
     print(
         f"RPii Web Ref:  {web_ref}"
     )
 
-    if web_ref == excel_order["order_id"]:
+    if web_ref == excel_order.order_id:
 
         print()
         print("✓ ORDER NUMBER MATCH")
@@ -422,7 +422,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_postcode = (
-        excel_order["postcode"]
+        excel_order.postcode
         .replace(" ", "")
         .upper()
     )
@@ -436,7 +436,7 @@ with sync_playwright() as p:
     )
 
     print(
-        f"Excel Postcode: {excel_order['postcode']}"
+        f"Excel Postcode: {excel_order.postcode}"
     )
 
     print(
@@ -487,7 +487,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_sku = str(
-        excel_order["sku"]
+        excel_order.sku
     ).strip().upper()
 
     rp2_sku = str(
@@ -558,7 +558,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_amount = round(
-        float(excel_order["price"]),
+        float(excel_order.price),
         2
     )
 
@@ -737,11 +737,11 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_phone_1 = normalise_phone(
-        excel_order["phone_1"]
+        excel_order.phone_1
     )
 
     excel_phone_2 = normalise_phone(
-        excel_order["phone_2"]
+        excel_order.phone_2
     )
 
     rp2_phone = normalise_phone(
@@ -749,11 +749,11 @@ with sync_playwright() as p:
     )
 
     print(
-        f"Excel Phone 1: {excel_order['phone_1']}"
+        f"Excel Phone 1: {excel_order.phone_1}"
     )
 
     print(
-        f"Excel Phone 2: {excel_order['phone_2']}"
+        f"Excel Phone 2: {excel_order.phone_2}"
     )
 
     print(
@@ -801,7 +801,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     mirakl_order = read_mirakl_order(
-        excel_order["order_id"]
+        excel_order.order_id
     )
 
     print(
@@ -1070,7 +1070,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     mirakl_threads = read_mirakl_threads(
-        excel_order["order_id"]
+        excel_order.order_id
     )
 
     existing_messages = mirakl_threads[
@@ -1434,7 +1434,7 @@ with sync_playwright() as p:
         )
 
         invoice_filename = (
-            f"{excel_order['order_id']}-"
+            f"{excel_order.order_id}-"
             f"{customer_surname}-invoice.pdf"
         )
 
@@ -1546,7 +1546,7 @@ with sync_playwright() as p:
 
     print()
     print(
-        f"Order:       {excel_order['order_id']}"
+        f"Order:       {excel_order.order_id}"
     )
 
     print(
@@ -1581,7 +1581,7 @@ with sync_playwright() as p:
     # ========================================================
 
     dry_run_payload = build_mirakl_dry_run_payload(
-        order_id=excel_order["order_id"],
+        order_id=excel_order.order_id,
         customer_name=customer_name,
         message_body=customer_message,
         invoice_path=invoice_path,
@@ -1656,7 +1656,7 @@ with sync_playwright() as p:
 
     if (
         dry_run_payload["order_id"]
-        != excel_order["order_id"]
+        != excel_order.order_id
     ):
         dry_run_failures.append(
             "Payload order number mismatch"
