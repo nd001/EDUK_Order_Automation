@@ -1,6 +1,5 @@
 import os
 import re
-from datetime import datetime, timedelta
 
 from playwright.sync_api import sync_playwright
 
@@ -28,6 +27,16 @@ from messaging import (
     build_ed_message,
 )
 
+from rp2 import (
+    read_payment_summary,
+    extract_web_ref,
+    extract_customer_name,
+    extract_delivery_customer,
+    extract_uk_postcode,
+    parse_delivery_block,
+    read_active_product,
+)
+
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
@@ -38,94 +47,6 @@ TEST_ORDER = None
 # HELPER FUNCTIONS
 # ============================================================
 
-
-
-def read_payment_summary(sales_frame):
-    """
-    Reads the RPii Payment Summary.
-
-    A sale is considered payment-processed if the Payment Summary
-    contains at least one payment row beneath the heading.
-
-    The payment amount itself is NOT used to determine this.
-    PREPAL, for example, may legitimately show 0.00.
-    """
-
-    payment_table = sales_frame.locator("#psum")
-
-    if payment_table.count() == 0:
-        return {
-            "processed": False,
-            "details": None,
-        }
-
-    rows = payment_table.locator("tr")
-
-    payment_details = []
-
-    for i in range(rows.count()):
-        row = rows.nth(i)
-        text = " ".join(
-            row.inner_text().split()
-        )
-
-        # Ignore the heading
-        if not text:
-            continue
-
-        if text.lower() == "payment summary":
-            continue
-
-        payment_details.append(text)
-
-    if payment_details:
-        return {
-            "processed": True,
-            "details": payment_details,
-        }
-
-    return {
-        "processed": False,
-        "details": None,
-    }
-
-def extract_web_ref(text):
-    """
-    Extracts:
-
-        Web Ref: 1068814250-A
-
-    from the larger RPii sale information panel.
-    """
-
-    match = re.search(
-        r"Web Ref:\s*([A-Za-z0-9\-]+)",
-        text
-    )
-
-    return match.group(1) if match else None
-
-
-def extract_customer_name(text):
-    """
-    RPii customer panel example:
-
-        DIY0205 • DIY • ...
-
-    For B&Q orders this is normally the generic
-    RPii account such as DIY, rather than the actual
-    delivery customer's name.
-    """
-
-    parts = [
-        part.strip()
-        for part in text.split("•")
-    ]
-
-    if len(parts) >= 2:
-        return parts[1]
-
-    return None
 
 def get_customer_surname(full_name):
     """
@@ -155,84 +76,6 @@ def get_customer_surname(full_name):
 
     return surname.title()
 
-def extract_delivery_customer(text):
-    """
-    Example RPii text:
-
-    JEEV9737 • Jackie Jeeves •
-    36, Smith Square, Doncaster, DN4 0SR
-    T: 07761022352 • e: ...
-    """
-
-    cleaned = " ".join(text.split())
-
-    parts = [
-        part.strip()
-        for part in cleaned.split("•")
-    ]
-
-    name = None
-    address = None
-    telephone = None
-
-    if len(parts) >= 2:
-        name = parts[1]
-
-    if len(parts) >= 3:
-        address = parts[2]
-
-        # Remove telephone/email text if it has been folded into this part
-        address = re.split(
-            r"\bT:\s*",
-            address
-        )[0].strip()
-
-    tel_match = re.search(
-        r"T:\s*([0-9 ]+)",
-        cleaned
-    )
-
-    if tel_match:
-        telephone = tel_match.group(1).strip()
-
-    return {
-        "name": name,
-        "address": address,
-        "telephone": telephone,
-    }
-
-def extract_uk_postcode(address):
-    """
-    Extract a UK postcode from the end of an address.
-
-    Examples:
-        DN4 0SR
-        BB18 6PZ
-        SW1A 1AA
-    """
-
-    if not address:
-        return None
-
-    match = re.search(
-        r"\b("
-        r"[A-Z]{1,2}\d[A-Z\d]?"
-        r"\s*"
-        r"\d[A-Z]{2}"
-        r")\b",
-        address.upper()
-    )
-
-    if not match:
-        return None
-
-    postcode = match.group(1).replace(" ", "")
-
-    # Standard UK postcode spacing:
-    # everything except last 3 characters + space + last 3
-    return postcode[:-3] + " " + postcode[-3:]
-
-
 
 def normalise_phone(number):
     if not number:
@@ -245,158 +88,6 @@ def normalise_phone(number):
 
     return number
 
-
-
-def parse_delivery_block(text):
-    """
-    Example SGK:
-
-        DELIVER SK
-        BN:09
-        070926:AM
-        SK
-
-    Example EDUK:
-
-        DELIVER ED
-        BN:09
-        120926:PM
-        ED
-
-    Business rule:
-
-        SGK:
-            use the RPii date exactly.
-
-        ED:
-            actual customer delivery date is
-            ONE DAY BEFORE the RPii date.
-    """
-
-    cleaned = " ".join(text.split())
-
-    courier = None
-
-    if "DELIVER SK" in cleaned:
-        courier = "SK"
-
-    elif "DELIVER ED" in cleaned:
-        courier = "ED"
-
-    date_match = re.search(
-        r"(\d{6}):(AM|PM)",
-        cleaned
-    )
-
-    rp2_date = None
-    customer_date = None
-    slot = None
-
-    if date_match:
-        date_text = date_match.group(1)
-        slot = date_match.group(2)
-
-        rp2_date = datetime.strptime(
-            date_text,
-            "%d%m%y"
-        ).date()
-
-        if courier == "ED":
-            customer_date = (
-                rp2_date - timedelta(days=1)
-            )
-
-        else:
-            customer_date = rp2_date
-
-    return {
-        "courier": courier,
-        "rp2_date": rp2_date,
-        "customer_date": customer_date,
-        "slot": slot,
-        "raw": cleaned,
-    }
-
-
-def read_active_product(sales_frame):
-    """
-    RPii presents sale product information in pairs:
-
-        Cell 0 = SKU / stock information
-        Cell 1 = description
-        Cell 2 = next SKU
-        Cell 3 = next description
-
-    Example cancelled/import-problem line:
-
-        WEBPART ( - : )
-
-    Example active line:
-
-        IB55732W (IB55 732 W UK) (1 -S L:W2)
-
-    We therefore choose the first product line
-    containing a positive quantity.
-    """
-
-    product_cells = sales_frame.locator(
-        "td.SALES-lines-left-wrap"
-    )
-
-    product_cell_count = product_cells.count()
-
-    sku = None
-    description = None
-    quantity = None
-
-    for i in range(
-        0,
-        product_cell_count - 1,
-        2
-    ):
-        sku_cell = product_cells.nth(i)
-        desc_cell = product_cells.nth(i + 1)
-
-        sku_text = " ".join(
-            sku_cell.inner_text().split()
-        )
-
-        description_text = " ".join(
-            desc_cell.inner_text().split()
-        )
-
-        # Active product example:
-        #
-        # (1 -S L:W2)
-        #
-        active_match = re.search(
-            r"\(\s*(\d+)\s+-",
-            sku_text
-        )
-
-        if not active_match:
-            continue
-
-        candidate_quantity = int(
-            active_match.group(1)
-        )
-
-        if candidate_quantity <= 0:
-            continue
-
-        candidate_sku = sku_text.split()[0]
-
-        sku = candidate_sku
-        description = description_text
-        quantity = candidate_quantity
-
-        break
-
-    return {
-        "sku": sku,
-        "description": description,
-        "quantity": quantity,
-    }
 
 excel_order = read_first_bq_order(
         ORDERS_FILE
