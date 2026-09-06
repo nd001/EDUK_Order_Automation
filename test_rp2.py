@@ -1,10 +1,8 @@
 import os
 import re
-import requests
 from datetime import datetime, timedelta
 
 from playwright.sync_api import sync_playwright
-from openpyxl import load_workbook
 
 from config import (
     MODE,
@@ -18,6 +16,13 @@ from config import (
     DIY_DELIVERY_TOPIC_CODE,
 )
 
+from marketplaces.diy import (
+    read_first_bq_order,
+    read_mirakl_order,
+    read_mirakl_threads,
+    build_mirakl_dry_run_payload,
+)
+
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
@@ -28,224 +33,7 @@ TEST_ORDER = None
 # HELPER FUNCTIONS
 # ============================================================
 
-def read_mirakl_order(order_id):
-    """
-    Read one B&Q Mirakl order.
 
-    READ ONLY.
-    """
-
-    url = (
-        f"{MIRAKL_BASE_URL.rstrip('/')}"
-        f"/api/orders"
-    )
-
-    headers = {
-        "Authorization": MIRAKL_API_KEY,
-        "Accept": "application/json",
-    }
-
-    params = {
-        "order_ids": order_id
-    }
-
-    response = requests.get(
-        url,
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Mirakl order lookup failed. "
-            f"HTTP {response.status_code}: "
-            f"{response.text}"
-        )
-
-    data = response.json()
-
-    orders = data.get("orders", [])
-
-    if len(orders) != 1:
-        raise RuntimeError(
-            f"Expected exactly 1 Mirakl order, "
-            f"found {len(orders)}."
-        )
-
-    order = orders[0]
-
-    customer = order.get(
-        "customer",
-        {}
-    )
-
-    shipping = customer.get(
-        "shipping_address",
-        {}
-    )
-
-    order_lines = order.get(
-        "order_lines",
-        []
-    )
-
-    if not order_lines:
-        raise RuntimeError(
-            "Mirakl order contains no order lines."
-        )
-
-    # For this first version we are validating
-    # the first line only, matching the RPii
-    # single-active-product prototype.
-    line = order_lines[0]
-
-    return {
-        "order_id": order.get("order_id"),
-        "sku": line.get("offer_sku"),
-        "price": float(
-            order.get("total_price", 0)
-        ),
-        "postcode": shipping.get(
-            "zip_code"
-        ),
-        "phone_1": shipping.get(
-            "phone"
-        ),
-        "phone_2": shipping.get(
-            "phone_secondary"
-        ),
-        "customer_name": (
-            f"{shipping.get('firstname', '')} "
-            f"{shipping.get('lastname', '')}"
-        ).strip(),
-        "description": line.get(
-            "description"
-        ),
-        "order_state": order.get(
-            "order_state"
-        ),
-    }
-
-def clean_mirakl_message_body(body):
-    """
-    Convert Mirakl's HTML message body into readable
-    plain text for the terminal safety review.
-    """
-
-    if not body:
-        return ""
-
-    text = body
-
-    # Convert common line breaks first
-    text = re.sub(
-        r"<br\s*/?>",
-        "\n",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    # Remove any remaining HTML tags
-    text = re.sub(
-        r"<[^>]+>",
-        "",
-        text
-    )
-
-    # Decode HTML entities such as &amp;
-    text = html.unescape(text)
-
-    return text.strip()
-
-
-def read_mirakl_threads(order_id):
-    """
-    Read existing Mirakl conversation threads for an order.
-
-    READ ONLY.
-    """
-
-    url = (
-        f"{MIRAKL_BASE_URL.rstrip('/')}"
-        f"/api/inbox/threads"
-    )
-
-    headers = {
-        "Authorization": MIRAKL_API_KEY,
-        "Accept": "application/json",
-    }
-
-    params = {
-        "entity_type": "MMP_ORDER",
-        "entity_id": order_id,
-        "with_messages": "true",
-    }
-
-    response = requests.get(
-        url,
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Mirakl thread lookup failed. "
-            f"HTTP {response.status_code}: "
-            f"{response.text}"
-        )
-
-    data = response.json()
-
-    threads = data.get(
-        "data",
-        []
-    )
-
-    all_messages = []
-
-    for thread in threads:
-
-        topic = thread.get(
-            "topic",
-            {}
-        )
-
-        for message in thread.get(
-            "messages",
-            []
-        ):
-
-            sender = message.get(
-                "from",
-                {}
-            )
-
-            all_messages.append(
-                {
-                    "thread_id": thread.get("id"),
-                    "topic_type": topic.get("type"),
-                    "topic_code": topic.get("value"),
-                    "message_id": message.get("id"),
-                    "date": message.get("date_created"),
-                    "sender_type": sender.get("type"),
-                    "sender_name": sender.get("display_name"),
-                    "body": clean_mirakl_message_body(
-                        message.get("body")
-                    ),
-                }
-            )
-
-    # ISO Mirakl timestamps sort correctly as strings.
-    all_messages.sort(
-        key=lambda message: message["date"] or ""
-    )
-
-    return {
-        "threads": threads,
-        "messages": all_messages,
-    }
 
 def read_payment_summary(sales_frame):
     """
@@ -439,51 +227,7 @@ def extract_uk_postcode(address):
     # everything except last 3 characters + space + last 3
     return postcode[:-3] + " " + postcode[-3:]
 
-def build_mirakl_dry_run_payload(
-    order_id,
-    customer_name,
-    message_body,
-    invoice_path,
-    existing_threads,
-):
-    """
-    Build a LOCAL representation of the Mirakl message
-    we intend to send.
 
-    IMPORTANT:
-    This function performs NO network request.
-    Nothing is sent to Mirakl.
-    """
-
-    thread_id = None
-
-    if existing_threads:
-        thread_id = existing_threads[0].get("id")
-
-    return {
-        "mode": "DRY_RUN",
-        "order_id": order_id,
-        "customer": customer_name,
-        "topic": {
-            "type": "REASON_CODE",
-            "value": "44",
-            "label": (
-                "Information about delivery "
-                "(incl. tracking)"
-            ),
-        },
-        "existing_thread_id": thread_id,
-        "message_body": message_body,
-        "attachment": {
-            "filename": os.path.basename(
-                invoice_path
-            ),
-            "path": invoice_path,
-            "exists": os.path.isfile(
-                invoice_path
-            ),
-        },
-    }
 
 def normalise_phone(number):
     if not number:
@@ -491,7 +235,7 @@ def normalise_phone(number):
 
     number = re.sub(r"\D", "", str(number))
 
-    if number.startswith("44"):
+    if number.startswith(DIY_DELIVERY_TOPIC_CODE):
         number = "0" + number[2:]
 
     return number
@@ -790,78 +534,6 @@ def read_active_product(sales_frame):
         "description": description,
         "quantity": quantity,
     }
-
-def read_first_bq_order(filename):
-    workbook = load_workbook(
-        filename,
-        data_only=True
-    )
-
-    sheet = workbook.active
-
-    headers = {
-        cell.value: cell.column
-        for cell in sheet[1]
-        if cell.value
-    }
-
-    required_columns = [
-        "Order number",
-        "Offer SKU",
-        "Amount",
-        "Billing address zip",
-        "Shipping address phone",
-        "Shipping address phone 2",
-    ]
-
-    for column in required_columns:
-        if column not in headers:
-            raise RuntimeError(
-                f"Missing required Excel column: {column}"
-            )
-
-    # First data row = oldest/top order
-    row = 2
-
-    order_id = sheet.cell(
-        row=row,
-        column=headers["Order number"]
-    ).value
-
-    sku = sheet.cell(
-        row=row,
-        column=headers["Offer SKU"]
-    ).value
-
-    price = sheet.cell(
-        row=row,
-        column=headers["Amount"]
-    ).value
-
-    postcode = sheet.cell(
-        row=row,
-        column=headers["Billing address zip"]
-    ).value
-
-    phone_1 = sheet.cell(
-        row=row,
-        column=headers["Shipping address phone"]
-    ).value
-
-    phone_2 = sheet.cell(
-    row=row,
-        column=headers["Shipping address phone 2"]
-    ).value
-
-    return {
-        "order_id": str(order_id).strip(),
-        "sku": str(sku).strip(),
-        "price": float(price),
-        "postcode": str(postcode).strip(),
-        "phone_1": str(phone_1).strip() if phone_1 else "",
-        "phone_2": str(phone_2).strip() if phone_2 else "",
-    }
-
 
 excel_order = read_first_bq_order(
         ORDERS_FILE
@@ -2016,7 +1688,7 @@ with sync_playwright() as p:
 
             print()
 
-            if str(latest_message["topic_code"]) == "44":
+            if str(latest_message["topic_code"]) == DIY_DELIVERY_TOPIC_CODE:
 
                 print(
                     "⚠ EXISTING DELIVERY MESSAGE FOUND"
@@ -2508,7 +2180,7 @@ with sync_playwright() as p:
 
     if (
         dry_run_payload["topic"]["value"]
-        != "44"
+        != DIY_DELIVERY_TOPIC_CODE
     ):
         dry_run_failures.append(
             "Incorrect Mirakl topic code"
