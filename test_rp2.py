@@ -37,6 +37,15 @@ from rp2 import (
     read_active_product,
 )
 
+from validation import (
+    normalise_phone,
+    normalise_postcode,
+    normalise_sku,
+    normalise_price,
+    build_three_way_safety_result,
+    can_override_sku_only,
+)
+
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
@@ -75,18 +84,6 @@ def get_customer_surname(full_name):
     )
 
     return surname.title()
-
-
-def normalise_phone(number):
-    if not number:
-        return ""
-
-    number = re.sub(r"\D", "", str(number))
-
-    if number.startswith(DIY_DELIVERY_TOPIC_CODE):
-        number = "0" + number[2:]
-
-    return number
 
 
 excel_order = read_first_bq_order(
@@ -846,159 +843,59 @@ with sync_playwright() as p:
     print("THREE-WAY SAFETY GATE")
     print("=" * 60)
 
-    safety_failures = []
-
     # --------------------------------------------------------
-    # ORDER NUMBER
+    # Build RPii data for validation
     # --------------------------------------------------------
 
-    if (
-        excel_order["order_id"]
-        == web_ref
-        == mirakl_order["order_id"]
-    ):
-        print("✓ Order number matches all 3 systems")
-    else:
+    rp2_validation_data = {
+        "order_id": web_ref,
+        "sku": sku,
+        "price": total_sale,
+        "postcode": delivery_postcode,
+        "telephone": delivery_customer["telephone"],
+    }
+
+    # --------------------------------------------------------
+    # Run three-way validation
+    # --------------------------------------------------------
+
+    safety_result = build_three_way_safety_result(
+        excel_order,
+        rp2_validation_data,
+        mirakl_order,
+    )
+
+    safety_failures = safety_result["failures"]
+    safety_values = safety_result["values"]
+
+    # --------------------------------------------------------
+    # DISPLAY RESULTS
+    # --------------------------------------------------------
+
+    if "Order number" in safety_failures:
         print("✗ Order number mismatch")
-        safety_failures.append(
-            "Order number"
-        )
-
-    # --------------------------------------------------------
-    # SKU
-    # --------------------------------------------------------
-
-    excel_sku = str(
-        excel_order["sku"]
-    ).strip().upper()
-
-    rp2_sku = str(
-        sku
-    ).strip().upper()
-
-    mirakl_sku = str(
-        mirakl_order["sku"]
-    ).strip().upper()
-
-    if (
-        excel_sku
-        == rp2_sku
-        == mirakl_sku
-    ):
-        print("✓ SKU matches all 3 systems")
     else:
+        print("✓ Order number matches all 3 systems")
+
+    if "SKU" in safety_failures:
         print("✗ SKU mismatch")
-        safety_failures.append(
-            "SKU"
-        )
-
-    # --------------------------------------------------------
-    # PRICE
-    # --------------------------------------------------------
-
-    excel_price = round(
-        float(excel_order["price"]),
-        2
-    )
-
-    rp2_price = round(
-        float(total_sale),
-        2
-    )
-
-    mirakl_price = round(
-        float(mirakl_order["price"]),
-        2
-    )
-
-    if (
-        excel_price
-        == rp2_price
-        == mirakl_price
-    ):
-        print("✓ Price matches all 3 systems")
     else:
+        print("✓ SKU matches all 3 systems")
+
+    if "Price" in safety_failures:
         print("✗ Price mismatch")
-        safety_failures.append(
-            "Price"
-        )
-
-    # --------------------------------------------------------
-    # POSTCODE
-    # --------------------------------------------------------
-
-    excel_pc = (
-        excel_order["postcode"]
-        .replace(" ", "")
-        .upper()
-    )
-
-    rp2_pc = (
-        delivery_postcode
-        .replace(" ", "")
-        .upper()
-    )
-
-    mirakl_pc = (
-        str(
-            mirakl_order["postcode"]
-        )
-        .replace(" ", "")
-        .upper()
-    )
-
-    if (
-        excel_pc
-        == rp2_pc
-        == mirakl_pc
-    ):
-        print("✓ Postcode matches all 3 systems")
     else:
+        print("✓ Price matches all 3 systems")
+
+    if "Postcode" in safety_failures:
         print("✗ Postcode mismatch")
-        safety_failures.append(
-            "Postcode"
-        )
-
-    # --------------------------------------------------------
-    # TELEPHONE
-    # --------------------------------------------------------
-
-    excel_phones = {
-        normalise_phone(
-            excel_order["phone_1"]
-        ),
-        normalise_phone(
-            excel_order["phone_2"]
-        ),
-    }
-
-    excel_phones.discard("")
-
-    rp2_phone = normalise_phone(
-        delivery_customer["telephone"]
-    )
-
-    mirakl_phones = {
-        normalise_phone(
-            mirakl_order["phone_1"]
-        ),
-        normalise_phone(
-            mirakl_order["phone_2"]
-        ),
-    }
-
-    mirakl_phones.discard("")
-
-    if (
-        rp2_phone in excel_phones
-        and rp2_phone in mirakl_phones
-    ):
-        print("✓ Telephone matches all 3 systems")
     else:
+        print("✓ Postcode matches all 3 systems")
+
+    if "Telephone" in safety_failures:
         print("✗ Telephone mismatch")
-        safety_failures.append(
-            "Telephone"
-        )
+    else:
+        print("✓ Telephone matches all 3 systems")
 
     print("=" * 60)
 
@@ -1008,63 +905,103 @@ with sync_playwright() as p:
 
     override_used = False
 
-    if safety_failures == ["SKU"]:
+    if can_override_sku_only(
+        safety_result
+    ):
 
-        if excel_sku == rp2_sku:
+        excel_sku = safety_values[
+            "excel_sku"
+        ]
 
-            print()
-            print("=" * 60)
-            print("MANUAL OVERRIDE AVAILABLE")
-            print("=" * 60)
+        rp2_sku = safety_values[
+            "rp2_sku"
+        ]
 
-            print("Excel SKU:     ", excel_sku)
-            print("RPii SKU:      ", rp2_sku)
-            print("Mirakl SKU:    ", mirakl_sku)
+        mirakl_sku = safety_values[
+            "mirakl_sku"
+        ]
 
-            print()
-            print(
-                "Excel and RPii agree, but Mirakl contains "
-                "a different SKU."
+        print()
+        print("=" * 60)
+        print("MANUAL OVERRIDE AVAILABLE")
+        print("=" * 60)
+
+        print(
+            "Excel SKU:     ",
+            excel_sku
+        )
+
+        print(
+            "RPii SKU:      ",
+            rp2_sku
+        )
+
+        print(
+            "Mirakl SKU:    ",
+            mirakl_sku
+        )
+
+        print()
+        print(
+            "Excel and RPii agree, but Mirakl "
+            "contains a different SKU."
+        )
+
+        print()
+        print(
+            "Type OVERRIDE to continue with "
+            "this order."
+        )
+
+        confirmation = input(
+            "\nOverride SKU mismatch? "
+        ).strip().upper()
+
+        if confirmation == "OVERRIDE":
+
+            override_used = True
+
+            # We deliberately remove ONLY the SKU
+            # failure after explicit user approval.
+            safety_failures.remove(
+                "SKU"
             )
 
             print()
             print(
-                "Type OVERRIDE to continue with this order."
+                "⚠ SKU OVERRIDE ACCEPTED"
             )
 
-            confirmation = input(
-                "\nOverride SKU mismatch? "
-            ).strip().upper()
+            print(
+                "Continuing using the "
+                "Excel/RPii SKU."
+            )
 
-            if confirmation == "OVERRIDE":
+        else:
 
-                override_used = True
-                safety_failures.remove("SKU")
+            print()
+            print(
+                "Override not accepted."
+            )
 
-                print()
-                print("⚠ SKU OVERRIDE ACCEPTED")
-                print(
-                    "Continuing using the Excel/RPii SKU."
-                )
-
-            else:
-
-                print()
-                print("Override not accepted.")
-
-    # --------------------------------------------------------
+    # ========================================================
     # HARD STOP
-    # --------------------------------------------------------
+    # ========================================================
 
     if safety_failures:
 
         print()
-        print("✗ THREE-WAY SAFETY GATE FAILED")
+        print(
+            "✗ THREE-WAY SAFETY GATE FAILED"
+        )
+
         print()
 
         print(
             "Problems found: "
-            + ", ".join(safety_failures)
+            + ", ".join(
+                safety_failures
+            )
         )
 
         print()
@@ -1080,8 +1017,6 @@ with sync_playwright() as p:
         browser.close()
         raise SystemExit
 
-    print()
-    
     # ========================================================
     # SAFETY GATE RESULT
     # ========================================================
@@ -1090,21 +1025,25 @@ with sync_playwright() as p:
 
     if override_used:
 
-        # print(
-        #     "⚠ THREE-WAY SAFETY GATE PASSED "
-        #     "WITH MANUAL SKU OVERRIDE"
-        # )
-
-        print()
         print(
-            f"Using Excel/RPii SKU: {excel_sku}"
-        )
-
-        print(
-            f"Ignoring Mirakl SKU:  {mirakl_sku}"
+            "⚠ THREE-WAY SAFETY GATE PASSED "
+            "WITH MANUAL SKU OVERRIDE"
         )
 
         print()
+
+        print(
+            "Using Excel/RPii SKU: "
+            f"{safety_values['excel_sku']}"
+        )
+
+        print(
+            "Ignoring Mirakl SKU:  "
+            f"{safety_values['mirakl_sku']}"
+        )
+
+        print()
+
         print(
             "All other safety checks agree."
         )
@@ -1116,19 +1055,10 @@ with sync_playwright() as p:
         )
 
         print()
+
         print(
             "Excel, RPii and Mirakl agree."
         )
-
-    if override_used:
-        print(
-        "⚠ SAFETY GATE PASSED WITH MANUAL SKU OVERRIDE"
-    )
-    else:
-        print()
-        print(
-        "✓ THREE-WAY SAFETY GATE PASSED"
-    )
 
     # ========================================================
     # MIRAKL CUSTOMER COMMUNICATION SAFETY CHECK
