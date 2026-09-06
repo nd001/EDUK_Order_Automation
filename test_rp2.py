@@ -90,32 +90,32 @@ marketplace = DIYMarketplaceAdapter(
     ORDERS_FILE
 )
 
-excel_order = marketplace.read_first_order()
+marketplace_order = marketplace.read_first_order()
 
 print()
 print("MARKETPLACE ADAPTER")
 print("=" * 60)
 print(f"Marketplace: {marketplace.name}")
-print(f"Order type:  {type(excel_order).__name__}")
+print(f"Order type:  {type(marketplace_order).__name__}")
 print("=" * 60)
 
-print("\nEXCEL DEBUG:")
-print(excel_order)
+print("\n MARKETPLACE ORDER DEBUG:")
+print(marketplace_order)
 
-TEST_ORDER = excel_order.order_id
+TEST_ORDER = marketplace_order.order_id
 
 print()
 print("=" * 60)
 print("B&Q EXCEL ORDER")
 print("=" * 60)
 print(
-    f"Order ID:      {excel_order.order_id}"
+    f"Order ID:      {marketplace_order.order_id}"
 )
 print(
-    f"SKU:           {excel_order.sku}"
+    f"SKU:           {marketplace_order.sku}"
 )
 print(
-    f"Price:         £{excel_order.price:.2f}"
+    f"Price:         £{marketplace_order.price:.2f}"
 )
 print("=" * 60)
 
@@ -353,14 +353,14 @@ with sync_playwright() as p:
     print("=" * 60)
 
     print(
-        f"Excel Order:   {excel_order.order_id}"
+        f"Marketplace Order:   {marketplace_order.order_id}"
     )
 
     print(
         f"RPii Web Ref:  {web_ref}"
     )
 
-    if web_ref == excel_order.order_id:
+    if web_ref == marketplace_order.order_id:
 
         print()
         print("✓ ORDER NUMBER MATCH")
@@ -431,7 +431,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_postcode = (
-        excel_order.postcode
+        marketplace_order.postcode
         .replace(" ", "")
         .upper()
     )
@@ -445,7 +445,7 @@ with sync_playwright() as p:
     )
 
     print(
-        f"Excel Postcode: {excel_order.postcode}"
+        f"Marketplace Postcode: {marketplace_order.postcode}"
     )
 
     print(
@@ -496,7 +496,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_sku = str(
-        excel_order.sku
+        marketplace_order.sku
     ).strip().upper()
 
     rp2_sku = str(
@@ -504,7 +504,7 @@ with sync_playwright() as p:
     ).strip().upper()
 
     print(
-        f"Excel SKU:     {excel_sku}"
+        f"Marketplace SKU:     {excel_sku}"
     )
 
     print(
@@ -567,7 +567,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_amount = round(
-        float(excel_order.price),
+        float(marketplace_order.price),
         2
     )
 
@@ -577,7 +577,7 @@ with sync_playwright() as p:
     )
 
     print(
-        f"Excel Amount:  £{excel_amount:.2f}"
+        f"Marketplace Amount:  £{excel_amount:.2f}"
     )
 
     print(
@@ -746,11 +746,11 @@ with sync_playwright() as p:
     print("=" * 60)
 
     excel_phone_1 = normalise_phone(
-        excel_order.phone_1
+        marketplace_order.phone_1
     )
 
     excel_phone_2 = normalise_phone(
-        excel_order.phone_2
+        marketplace_order.phone_2
     )
 
     rp2_phone = normalise_phone(
@@ -758,11 +758,11 @@ with sync_playwright() as p:
     )
 
     print(
-        f"Excel Phone 1: {excel_order.phone_1}"
+        f"Marketplace Phone 1: {marketplace_order.phone_1}"
     )
 
     print(
-        f"Excel Phone 2: {excel_order.phone_2}"
+        f"Marketplace Phone 2: {marketplace_order.phone_2}"
     )
 
     print(
@@ -810,7 +810,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     mirakl_order = read_mirakl_order(
-        excel_order.order_id
+        marketplace_order.order_id
     )
 
     print(
@@ -869,7 +869,7 @@ with sync_playwright() as p:
     # --------------------------------------------------------
 
     safety_result = build_three_way_safety_result(
-        excel_order,
+        marketplace_order,
         rp2_validation_data,
         mirakl_order,
     )
@@ -952,7 +952,7 @@ with sync_playwright() as p:
 
         print()
         print(
-            "Excel and RPii agree, but Mirakl "
+            "Marketplace and RPii agree, but Mirakl "
             "contains a different SKU."
         )
 
@@ -1042,7 +1042,7 @@ with sync_playwright() as p:
         print()
 
         print(
-            "Using Excel/RPii SKU: "
+            "Using Marketplace/RPii SKU: "
             f"{safety_values['excel_sku']}"
         )
 
@@ -1066,7 +1066,7 @@ with sync_playwright() as p:
         print()
 
         print(
-            "Excel, RPii and Mirakl agree."
+            "Marketplace, RPii and Mirakl agree."
         )
 
     # ========================================================
@@ -1079,7 +1079,7 @@ with sync_playwright() as p:
     print("=" * 60)
 
     mirakl_threads = read_mirakl_threads(
-        excel_order.order_id
+        marketplace_order.order_id
     )
 
     existing_messages = mirakl_threads[
@@ -1443,7 +1443,7 @@ with sync_playwright() as p:
         )
 
         invoice_filename = (
-            f"{excel_order.order_id}-"
+            f"{marketplace_order.order_id}-"
             f"{customer_surname}-invoice.pdf"
         )
 
@@ -1555,7 +1555,7 @@ with sync_playwright() as p:
 
     print()
     print(
-        f"Order:       {excel_order.order_id}"
+        f"Order:       {marketplace_order.order_id}"
     )
 
     print(
@@ -1590,7 +1590,7 @@ with sync_playwright() as p:
     # ========================================================
 
     dry_run_payload = build_mirakl_dry_run_payload(
-        order_id=excel_order.order_id,
+        order_id=marketplace_order.order_id,
         customer_name=customer_name,
         message_body=customer_message,
         invoice_path=invoice_path,
@@ -1665,7 +1665,7 @@ with sync_playwright() as p:
 
     if (
         dry_run_payload["order_id"]
-        != excel_order.order_id
+        != marketplace_order.order_id
     ):
         dry_run_failures.append(
             "Payload order number mismatch"
