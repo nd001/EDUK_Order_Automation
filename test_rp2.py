@@ -1,79 +1,27 @@
 import os
 import re
 import requests
-import html
-
 from datetime import datetime, timedelta
 
-
-from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from openpyxl import load_workbook
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-# Change this depending on where you are running the program:
-#
-# "work"   = work network
-# "remote" = home / remote connection
-#
-MODE = "remote"
-ORDERS_FILE = "orders.xlsx"
-
-WORK_URL = "https://gar.rpdns.co.uk/companyGAR/rp2.cgi"
-REMOTE_URL = "https://garremote.rpdns.co.uk/companyGAR/rp2.cgi"
-INVOICE_FOLDER = r"C:\Users\Noel\Documents\OK TO DELETE"
+from config import (
+    MODE,
+    ORDERS_FILE,
+    INVOICE_FOLDER,
+    RP2_URL,
+    RP2_REMOTE_USERNAME,
+    RP2_REMOTE_PASSWORD,
+    MIRAKL_BASE_URL,
+    MIRAKL_API_KEY,
+    DIY_DELIVERY_TOPIC_CODE,
+)
 
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
 
-# ============================================================
-# LOAD REMOTE CREDENTIALS
-# ============================================================
-
-load_dotenv()
-
-RP2_REMOTE_USERNAME = os.getenv("RP2_REMOTE_USERNAME")
-RP2_REMOTE_PASSWORD = os.getenv("RP2_REMOTE_PASSWORD")
-
-MIRAKL_BASE_URL = os.getenv(
-    "MIRAKL_BASE_URL"
-)
-
-MIRAKL_API_KEY = os.getenv(
-    "MIRAKL_API_KEY"
-)
-
-if not MIRAKL_BASE_URL:
-    raise RuntimeError(
-        "MIRAKL_BASE_URL missing from .env"
-    )
-
-if not MIRAKL_API_KEY:
-    raise RuntimeError(
-        "MIRAKL_API_KEY missing from .env"
-    )
-
-
-if MODE == "remote":
-    RP2_URL = REMOTE_URL
-
-    if not RP2_REMOTE_USERNAME or not RP2_REMOTE_PASSWORD:
-        raise RuntimeError(
-            "Remote RPii username/password missing from .env file."
-        )
-
-elif MODE == "work":
-    RP2_URL = WORK_URL
-
-else:
-    raise ValueError(
-        'MODE must be either "work" or "remote".'
-    )
 
 
 # ============================================================
@@ -490,6 +438,52 @@ def extract_uk_postcode(address):
     # Standard UK postcode spacing:
     # everything except last 3 characters + space + last 3
     return postcode[:-3] + " " + postcode[-3:]
+
+def build_mirakl_dry_run_payload(
+    order_id,
+    customer_name,
+    message_body,
+    invoice_path,
+    existing_threads,
+):
+    """
+    Build a LOCAL representation of the Mirakl message
+    we intend to send.
+
+    IMPORTANT:
+    This function performs NO network request.
+    Nothing is sent to Mirakl.
+    """
+
+    thread_id = None
+
+    if existing_threads:
+        thread_id = existing_threads[0].get("id")
+
+    return {
+        "mode": "DRY_RUN",
+        "order_id": order_id,
+        "customer": customer_name,
+        "topic": {
+            "type": "REASON_CODE",
+            "value": "44",
+            "label": (
+                "Information about delivery "
+                "(incl. tracking)"
+            ),
+        },
+        "existing_thread_id": thread_id,
+        "message_body": message_body,
+        "attachment": {
+            "filename": os.path.basename(
+                invoice_path
+            ),
+            "path": invoice_path,
+            "exists": os.path.isfile(
+                invoice_path
+            ),
+        },
+    }
 
 def normalise_phone(number):
     if not number:
@@ -1782,6 +1776,56 @@ with sync_playwright() as p:
 
     print("=" * 60)
 
+    # ========================================================
+    # CONTROLLED MANUAL OVERRIDE - SKU ONLY
+    # ========================================================
+
+    override_used = False
+
+    if safety_failures == ["SKU"]:
+
+        if excel_sku == rp2_sku:
+
+            print()
+            print("=" * 60)
+            print("MANUAL OVERRIDE AVAILABLE")
+            print("=" * 60)
+
+            print("Excel SKU:     ", excel_sku)
+            print("RPii SKU:      ", rp2_sku)
+            print("Mirakl SKU:    ", mirakl_sku)
+
+            print()
+            print(
+                "Excel and RPii agree, but Mirakl contains "
+                "a different SKU."
+            )
+
+            print()
+            print(
+                "Type OVERRIDE to continue with this order."
+            )
+
+            confirmation = input(
+                "\nOverride SKU mismatch? "
+            ).strip().upper()
+
+            if confirmation == "OVERRIDE":
+
+                override_used = True
+                safety_failures.remove("SKU")
+
+                print()
+                print("⚠ SKU OVERRIDE ACCEPTED")
+                print(
+                    "Continuing using the Excel/RPii SKU."
+                )
+
+            else:
+
+                print()
+                print("Override not accepted.")
+
     # --------------------------------------------------------
     # HARD STOP
     # --------------------------------------------------------
@@ -1811,13 +1855,56 @@ with sync_playwright() as p:
         raise SystemExit
 
     print()
-    print("✓ THREE-WAY SAFETY GATE PASSED")
+    
+    # ========================================================
+    # SAFETY GATE RESULT
+    # ========================================================
+
     print()
-    print(
-        "Excel, RPii and Mirakl agree."
+
+    if override_used:
+
+        # print(
+        #     "⚠ THREE-WAY SAFETY GATE PASSED "
+        #     "WITH MANUAL SKU OVERRIDE"
+        # )
+
+        print()
+        print(
+            f"Using Excel/RPii SKU: {excel_sku}"
+        )
+
+        print(
+            f"Ignoring Mirakl SKU:  {mirakl_sku}"
+        )
+
+        print()
+        print(
+            "All other safety checks agree."
+        )
+
+    else:
+
+        print(
+            "✓ THREE-WAY SAFETY GATE PASSED"
+        )
+
+        print()
+        print(
+            "Excel, RPii and Mirakl agree."
+        )
+
+    if override_used:
+        print(
+        "⚠ SAFETY GATE PASSED WITH MANUAL SKU OVERRIDE"
+    )
+    else:
+        print()
+        print(
+        "✓ THREE-WAY SAFETY GATE PASSED"
     )
 
-        # ========================================================
+    # ========================================================
     # MIRAKL CUSTOMER COMMUNICATION SAFETY CHECK
     # ========================================================
 
@@ -2332,6 +2419,163 @@ with sync_playwright() as p:
     print()
     print(customer_message)
     print()
+
+        # ========================================================
+    # MIRAKL SEND PAYLOAD - DRY RUN ONLY
+    # ========================================================
+
+    dry_run_payload = build_mirakl_dry_run_payload(
+        order_id=excel_order["order_id"],
+        customer_name=customer_name,
+        message_body=customer_message,
+        invoice_path=invoice_path,
+        existing_threads=mirakl_threads["threads"],
+    )
+
+    print()
+    print("=" * 60)
+    print("MIRAKL SEND PAYLOAD - DRY RUN")
+    print("=" * 60)
+
+    print(
+        f"Mode:          "
+        f"{dry_run_payload['mode']}"
+    )
+
+    print(
+        f"Order:         "
+        f"{dry_run_payload['order_id']}"
+    )
+
+    print(
+        f"Customer:      "
+        f"{dry_run_payload['customer']}"
+    )
+
+    print(
+        f"Topic:         "
+        f"{dry_run_payload['topic']['label']}"
+    )
+
+    print(
+        f"Topic Code:    "
+        f"{dry_run_payload['topic']['value']}"
+    )
+
+    print(
+        f"Existing Thread: "
+        f"{dry_run_payload['existing_thread_id']}"
+    )
+
+    print(
+        f"Attachment:    "
+        f"{dry_run_payload['attachment']['filename']}"
+    )
+
+    print(
+        f"File exists:   "
+        f"{dry_run_payload['attachment']['exists']}"
+    )
+
+    print()
+    print("MESSAGE BODY")
+    print("-" * 60)
+
+    print(
+        dry_run_payload["message_body"]
+    )
+
+    print("-" * 60)
+
+    # --------------------------------------------------------
+    # DRY-RUN SAFETY VALIDATION
+    # --------------------------------------------------------
+
+    dry_run_failures = []
+
+    if dry_run_payload["mode"] != "DRY_RUN":
+        dry_run_failures.append(
+            "Payload is not marked DRY_RUN"
+        )
+
+    if (
+        dry_run_payload["order_id"]
+        != excel_order["order_id"]
+    ):
+        dry_run_failures.append(
+            "Payload order number mismatch"
+        )
+
+    if (
+        dry_run_payload["topic"]["value"]
+        != "44"
+    ):
+        dry_run_failures.append(
+            "Incorrect Mirakl topic code"
+        )
+
+    if not dry_run_payload[
+        "message_body"
+    ].strip():
+        dry_run_failures.append(
+            "Customer message is blank"
+        )
+
+    if not dry_run_payload[
+        "attachment"
+    ]["exists"]:
+        dry_run_failures.append(
+            "Invoice attachment does not exist"
+        )
+
+    print()
+    print("=" * 60)
+    print("DRY-RUN PAYLOAD SAFETY CHECK")
+    print("=" * 60)
+
+    if dry_run_failures:
+
+        for failure in dry_run_failures:
+            print(
+                f"✗ {failure}"
+            )
+
+        print()
+        print(
+            "✗ DRY-RUN PAYLOAD FAILED"
+        )
+
+        print(
+            "A Mirakl send operation would "
+            "NOT be permitted."
+        )
+
+    else:
+
+        print(
+            "✓ Order number present and correct"
+        )
+        print(
+            "✓ Delivery topic is 44"
+        )
+        print(
+            "✓ Message body is present"
+        )
+        print(
+            "✓ Invoice attachment exists"
+        )
+
+        print()
+        print(
+            "✓ DRY-RUN PAYLOAD PASSED"
+        )
+
+    print()
+    print(
+        "DRY RUN ONLY - NO API WRITE REQUEST "
+        "HAS BEEN MADE."
+    )
+
     print("-" * 60)
 
     print()
