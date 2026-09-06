@@ -11,6 +11,8 @@ from config import (
     DIY_DELIVERY_TOPIC_CODE,
 )
 
+from models import MarketplaceOrder
+
 
 # ============================================================
 # DIY / B&Q EXCEL IMPORT
@@ -86,22 +88,29 @@ def read_first_bq_order(filename):
         column=headers["Shipping address phone 2"]
     ).value
 
-    return {
-        "order_id": str(order_id).strip(),
-        "sku": str(sku).strip(),
-        "price": float(price),
-        "postcode": str(postcode).strip(),
-        "phone_1": (
-            str(phone_1).strip()
-            if phone_1
-            else ""
-        ),
-        "phone_2": (
-            str(phone_2).strip()
-            if phone_2
-            else ""
-        ),
-    }
+    return MarketplaceOrder(
+    marketplace="DIY",
+
+    order_id=str(order_id).strip(),
+
+    sku=str(sku).strip(),
+
+    price=float(price),
+
+    postcode=str(postcode).strip(),
+
+    phone_1=(
+        str(phone_1).strip()
+        if phone_1
+        else ""
+    ),
+
+    phone_2=(
+        str(phone_2).strip()
+        if phone_2
+        else ""
+    ),
+)
 
 
 # ============================================================
