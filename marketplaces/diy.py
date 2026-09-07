@@ -52,7 +52,7 @@ def read_bq_orders(filename):
         "Order number",
         "Offer SKU",
         "Amount",
-        "Billing address zip",
+        "Shipping address zip",
         "Shipping address phone",
         "Shipping address phone 2",
     ]
@@ -94,7 +94,7 @@ def read_bq_orders(filename):
 
         postcode = sheet.cell(
             row=row,
-            column=headers["Billing address zip"]
+            column=headers["Shipping address zip"]
         ).value
 
         phone_1 = sheet.cell(
@@ -270,6 +270,9 @@ def read_mirakl_order(order_id):
         ),
         "shipping_tracking": order.get(
             "shipping_tracking"
+        ),
+        "shipping_deadline": order.get(
+            "shipping_deadline"
         ),
     }
 

@@ -50,6 +50,8 @@ from validation import (
     can_override_sku_only,
 )
 
+from datetime import datetime
+
 # Temporary test order.
 # We will replace this with the B&Q Excel import next.
 TEST_ORDER = None
@@ -468,7 +470,6 @@ def complete_mirakl_shipping(
     browser.close()
     raise SystemExit
 
-
 marketplace = DIYMarketplaceAdapter(
     ORDERS_FILE
 )
@@ -476,9 +477,21 @@ marketplace = DIYMarketplaceAdapter(
 marketplace_orders = marketplace.read_orders()
 
 print()
-print("=" * 60)
+print("=" * 100)
 print("DIY ORDER QUEUE")
-print("=" * 60)
+print("=" * 100)
+
+print(
+    f"{'':>3}"
+    f"{'ORDER':<15} "
+    f"{'SKU':<18} "
+    f"{'PRICE':>9}   "
+    f"{'MIRAKL STATE':<15} "
+    f"{'SHIP BY':<12} "
+    f"STATUS"
+)
+
+print("-" * 100)
 
 for index, order in enumerate(
     marketplace_orders,
@@ -493,6 +506,40 @@ for index, order in enumerate(
         mirakl_state = mirakl_queue_order[
             "order_state"
         ]
+
+        # ----------------------------------------------------
+        # Shipping deadline
+        # ----------------------------------------------------
+
+        shipping_deadline_raw = (
+            mirakl_queue_order.get(
+                "shipping_deadline"
+            )
+        )
+
+        if shipping_deadline_raw:
+
+            try:
+                shipping_deadline = (
+                    datetime.fromisoformat(
+                        shipping_deadline_raw.replace(
+                            "Z",
+                            "+00:00"
+                        )
+                    ).strftime(
+                        "%d/%m/%Y"
+                    )
+                )
+
+            except ValueError:
+                shipping_deadline = "INVALID DATE"
+
+        else:
+            shipping_deadline = "-"
+
+        # ----------------------------------------------------
+        # Basic queue status
+        # ----------------------------------------------------
 
         queue_status = get_queue_status(
             mirakl_state
@@ -534,6 +581,7 @@ for index, order in enumerate(
 
     except Exception as error:
         mirakl_state = "ERROR"
+        shipping_deadline = "-"
         queue_status = "⚠ LOOKUP FAILED"
 
     print(
@@ -542,10 +590,11 @@ for index, order in enumerate(
         f"{order.sku:<18} "
         f"£{order.price:>8.2f}   "
         f"{mirakl_state:<15} "
+        f"{shipping_deadline:<12} "
         f"{queue_status}"
     )
 
-print("=" * 60)
+print("=" * 100)
 
 while True:
 
@@ -1915,6 +1964,51 @@ with sync_playwright() as p:
         page.wait_for_timeout(1000)
 
         print("✓ Print panel opened.")
+
+        # ====================================================
+        # RPii SMS CONTROLS - READ ONLY
+        # ====================================================
+
+        sms_mobile = sales_frame.locator(
+            "#pr_cus_mobile"
+        )
+
+        sms_text = sales_frame.locator(
+            "#del_cus_text"
+        )
+
+        sms_send_button = sales_frame.locator(
+            'img[onclick^="sendText("]'
+        )
+
+        print()
+        print("=" * 60)
+        print("RPii SMS CONTROLS - READ ONLY")
+        print("=" * 60)
+
+        print(
+            f"Mobile field found: "
+            f"{sms_mobile.count() == 1}"
+        )
+
+        print(
+            f"Message field found: "
+            f"{sms_text.count() == 1}"
+        )
+
+        print(
+            f"SMS button found:    "
+            f"{sms_send_button.count() == 1}"
+        )
+
+        print()
+        print("NO SMS HAS BEEN SENT.")
+
+        # ----------------------------------------------------
+        # END SMS BLOCK
+        # ----------------------------------------------------
+        
+
 
         # ----------------------------------------------------
         # Find A4 Invoice
