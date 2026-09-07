@@ -26,10 +26,13 @@ DIY_DIRECT_DELIVERY_CARRIER_LABEL = (
 # DIY / B&Q EXCEL IMPORT
 # ============================================================
 
-def read_first_bq_order(filename):
+def read_bq_orders(filename):
     """
-    Read the first/top order from the B&Q unshipped-orders
+    Read all orders from the B&Q unshipped-orders
     Excel export.
+
+    Returns a list of MarketplaceOrder objects
+    in spreadsheet order.
     """
 
     workbook = load_workbook(
@@ -63,62 +66,91 @@ def read_first_bq_order(filename):
                 f"{column}"
             )
 
-    # First data row = oldest/top order
-    row = 2
+    orders = []
 
-    order_id = sheet.cell(
-        row=row,
-        column=headers["Order number"]
-    ).value
+    for row in range(
+        2,
+        sheet.max_row + 1
+    ):
 
-    sku = sheet.cell(
-        row=row,
-        column=headers["Offer SKU"]
-    ).value
+        order_id = sheet.cell(
+            row=row,
+            column=headers["Order number"]
+        ).value
 
-    price = sheet.cell(
-        row=row,
-        column=headers["Amount"]
-    ).value
+        # Ignore completely empty rows.
+        if not order_id:
+            continue
 
-    postcode = sheet.cell(
-        row=row,
-        column=headers["Billing address zip"]
-    ).value
+        sku = sheet.cell(
+            row=row,
+            column=headers["Offer SKU"]
+        ).value
 
-    phone_1 = sheet.cell(
-        row=row,
-        column=headers["Shipping address phone"]
-    ).value
+        price = sheet.cell(
+            row=row,
+            column=headers["Amount"]
+        ).value
 
-    phone_2 = sheet.cell(
-        row=row,
-        column=headers["Shipping address phone 2"]
-    ).value
+        postcode = sheet.cell(
+            row=row,
+            column=headers["Billing address zip"]
+        ).value
 
-    return MarketplaceOrder(
-    marketplace="DIY",
+        phone_1 = sheet.cell(
+            row=row,
+            column=headers["Shipping address phone"]
+        ).value
 
-    order_id=str(order_id).strip(),
+        phone_2 = sheet.cell(
+            row=row,
+            column=headers["Shipping address phone 2"]
+        ).value
 
-    sku=str(sku).strip(),
+        order = MarketplaceOrder(
+            marketplace="DIY",
 
-    price=float(price),
+            order_id=str(order_id).strip(),
 
-    postcode=str(postcode).strip(),
+            sku=str(sku).strip(),
 
-    phone_1=(
-        str(phone_1).strip()
-        if phone_1
-        else ""
-    ),
+            price=float(price),
 
-    phone_2=(
-        str(phone_2).strip()
-        if phone_2
-        else ""
-    ),
-)
+            postcode=str(postcode).strip(),
+
+            phone_1=(
+                str(phone_1).strip()
+                if phone_1
+                else ""
+            ),
+
+            phone_2=(
+                str(phone_2).strip()
+                if phone_2
+                else ""
+            ),
+        )
+
+        orders.append(order)
+
+    if not orders:
+        raise RuntimeError(
+            "No B&Q orders were found in the spreadsheet."
+        )
+
+    return orders
+
+
+def read_first_bq_order(filename):
+    """
+    Compatibility wrapper.
+
+    Return the first order from the B&Q spreadsheet.
+    """
+
+    orders = read_bq_orders(filename)
+
+    return orders[0]    
 
 
 # ============================================================
@@ -687,7 +719,18 @@ class DIYMarketplaceAdapter(MarketplaceAdapter):
     def name(self) -> str:
         return "DIY"
 
+    def read_orders(self):
+        """
+        Return all currently exported DIY orders.
+        """
+        return read_bq_orders(
+            self.orders_file
+        )
+
     def read_first_order(self) -> MarketplaceOrder:
+        """
+        Compatibility method.
+        """
         return read_first_bq_order(
             self.orders_file
         )

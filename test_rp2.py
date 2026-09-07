@@ -64,6 +64,29 @@ LIVE_MIRAKL_SEND_ENABLED = True
 # HELPER FUNCTIONS
 # ============================================================
 
+def get_queue_status(mirakl_state):
+    """
+    Convert Mirakl order state into a simple
+    operator-facing queue status.
+    """
+
+    if mirakl_state in (
+        "SHIPPED",
+        "WAITING_DEBIT",
+        "RECEIVED",
+        "CLOSED",
+    ):
+        return "✓ COMPLETE"
+
+    if mirakl_state == "SHIPPING":
+        return "→ READY"
+
+    if mirakl_state:
+        return f"⚠ {mirakl_state}"
+
+    return "⚠ UNKNOWN"
+
+
 
 def get_customer_surname(full_name):
     """
@@ -450,7 +473,142 @@ marketplace = DIYMarketplaceAdapter(
     ORDERS_FILE
 )
 
-marketplace_order = marketplace.read_first_order()
+marketplace_orders = marketplace.read_orders()
+
+print()
+print("=" * 60)
+print("DIY ORDER QUEUE")
+print("=" * 60)
+
+for index, order in enumerate(
+    marketplace_orders,
+    start=1
+):
+
+    try:
+        mirakl_queue_order = read_mirakl_order(
+            order.order_id
+        )
+
+        mirakl_state = mirakl_queue_order[
+            "order_state"
+        ]
+
+        queue_status = get_queue_status(
+            mirakl_state
+        )
+
+        # ----------------------------------------------------
+        # Check for an existing customer conversation
+        # ----------------------------------------------------
+
+        if mirakl_state == "SHIPPING":
+
+            mirakl_threads = read_mirakl_threads(
+                order.order_id
+            )
+
+            queue_messages = mirakl_threads[
+                "messages"
+            ]
+
+            if queue_messages:
+
+                latest_queue_message = (
+                    queue_messages[-1]
+                )
+
+                latest_topic = (
+                    latest_queue_message[
+                        "topic_code"
+                    ]
+                )
+
+                # Topic 44 is our normal delivery message.
+                # Any other conversation requires operator
+                # review before treating the order as ready.
+                if str(latest_topic) != "44":
+                    queue_status = (
+                        "⚠ CUSTOMER REVIEW"
+                    )
+
+    except Exception as error:
+        mirakl_state = "ERROR"
+        queue_status = "⚠ LOOKUP FAILED"
+
+    print(
+        f"{index:>2}. "
+        f"{order.order_id:<15} "
+        f"{order.sku:<18} "
+        f"£{order.price:>8.2f}   "
+        f"{mirakl_state:<15} "
+        f"{queue_status}"
+    )
+
+print("=" * 60)
+
+while True:
+
+    selection = input(
+        "\nSelect order number to process: "
+    ).strip()
+
+    try:
+        selection_number = int(selection)
+
+    except ValueError:
+
+        print(
+            "Please enter the number shown "
+            "beside the order."
+        )
+        continue
+
+    if not (
+        1
+        <= selection_number
+        <= len(marketplace_orders)
+    ):
+
+        print(
+            "That order number is not in the list."
+        )
+        continue
+
+    break
+
+marketplace_order = marketplace_orders[
+    selection_number - 1
+]
+
+print()
+print("=" * 60)
+print("SELECTED MARKETPLACE ORDER")
+print("=" * 60)
+
+print(
+    f"Marketplace:  {marketplace_order.marketplace}"
+)
+
+print(
+    f"Order ID:     {marketplace_order.order_id}"
+)
+
+print(
+    f"SKU:          {marketplace_order.sku}"
+)
+
+print(
+    f"Price:        £{marketplace_order.price:.2f}"
+)
+
+print("=" * 60)
+
+input(
+    "\nCheck the selected order above. "
+    "Press ENTER to continue..."
+)
+
 
 print()
 print("MARKETPLACE ADAPTER")
@@ -974,6 +1132,27 @@ with sync_playwright() as p:
         "td.tcb"
     )
 
+    print()
+    print("=" * 70)
+    print("DELIVERY CELL DIAGNOSTIC")
+    print("=" * 70)
+
+    for i in range(delivery_cells.count()):
+
+        cell_text = (
+            delivery_cells.nth(i)
+            .inner_text()
+            .strip()
+        )
+
+        if cell_text:
+
+            print(
+                f"CELL {i}: {repr(cell_text)}"
+            )
+
+    print("=" * 70)
+
     delivery_text = None
 
     for i in range(
@@ -983,7 +1162,10 @@ with sync_playwright() as p:
             i
         ).inner_text()
 
-        if "DELIVER" in text:
+        if (
+            "DELIVER" in text
+            or "DELVRD" in text
+        ):
             delivery_text = text
             break
 
@@ -2149,35 +2331,56 @@ with sync_playwright() as p:
     print()
     print("NOTHING HAS BEEN SENT.")
 
-    # ============================================================
-    # FINAL MIRAKL LIVE-SEND GATE
-    # ============================================================
+     # ========================================================
+    # FINAL CUSTOMER COMMUNICATION REVIEW
+    # ========================================================
 
-    print()
-    print("=" * 60)
-    print("FINAL MIRAKL SEND CONFIRMATION")
-    print("=" * 60)
+    if existing_messages:
 
-    print(f"Marketplace:    {marketplace_order.marketplace}")
-    print(f"Order:          {marketplace_order.order_id}")
-    print(f"Customer:       {delivery_customer['name']}")
-    print(
-        "Topic:          "
-        "Information about delivery (incl. tracking)"
-    )
-    print("Topic Code:     44")
-    print(f"Attachment:     {invoice_filename}")
+        print()
+        print("=" * 60)
+        print("LATEST MIRAKL MESSAGE - REVIEW BEFORE SENDING")
+        print("=" * 60)
 
-    print()
-    print("✓ Marketplace/RPii/Mirakl validation passed")
-    print("✓ Communication safety check passed")
-    print("✓ Invoice attachment exists")
-    print("✓ Dry-run payload validation passed")
-
-    if override_used:
         print(
-            "⚠ Manual SKU override was used for this order"
+            f"Latest sender: "
+            f"{latest_message['sender_name']}"
         )
+
+        print(
+            f"Latest date:   "
+            f"{latest_message['date']}"
+        )
+
+        print(
+            f"Topic code:    "
+            f"{latest_message['topic_code']}"
+        )
+
+        print()
+        print("LATEST MESSAGE")
+        print("-" * 60)
+
+        print(
+            latest_message["body"]
+        )
+
+        print("-" * 60)
+
+    else:
+
+        print()
+        print("=" * 60)
+        print("LATEST MIRAKL MESSAGE - REVIEW BEFORE SENDING")
+        print("=" * 60)
+
+        print("No existing customer messages.")
+
+        print("-" * 60)
+
+    # ========================================================
+    # FINAL CUSTOMER SEND GATE
+    # ========================================================
 
     print()
     print("=" * 60)
@@ -2211,14 +2414,18 @@ with sync_playwright() as p:
 
         print()
         print("✗ LIVE SEND NOT AUTHORISED")
+
         print()
         print(
             "The confirmation did not exactly match:"
         )
+
         print(expected_confirmation)
 
         print()
-        print("No Mirakl message has been sent.")
+        print(
+            "No Mirakl message has been sent."
+        )
 
         input(
             "\nPress ENTER to close..."
@@ -2227,43 +2434,14 @@ with sync_playwright() as p:
         browser.close()
         raise SystemExit
 
-
     print()
     print("✓ LIVE SEND AUTHORISATION ACCEPTED")
+
     print()
     print(
         f"Order {marketplace_order.order_id} "
         "has passed the final operator gate."
     )
-
-    # ========================================================
-    # LIVE MIRAKL SEND
-    # ========================================================
-
-    if not LIVE_MIRAKL_SEND_ENABLED:
-
-        print()
-        print("=" * 60)
-        print("LIVE API WRITE DISABLED")
-        print("=" * 60)
-
-        print()
-        print(
-            "Final operator authorisation passed, "
-            "but LIVE_MIRAKL_SEND_ENABLED is False."
-        )
-
-        print()
-        print(
-            "NO CUSTOMER MESSAGE HAS BEEN SENT."
-        )
-
-        input(
-            "\nPress ENTER to close..."
-        )
-
-        browser.close()
-        raise SystemExit
 
     # --------------------------------------------------------
     # LIVE SEND

@@ -213,10 +213,26 @@ def parse_delivery_block(text):
 
     courier = None
 
+    courier = None
+
+# Pre-manifest RPii format
     if "DELIVER SK" in cleaned:
         courier = "SK"
 
     elif "DELIVER ED" in cleaned:
+        courier = "ED"
+
+    # Post-manifest RPii format
+    elif re.search(
+        r"\bDELVRD\b.*\bSK\b",
+        cleaned
+    ):
+        courier = "SK"
+
+    elif re.search(
+        r"\bDELVRD\b.*\bED\b",
+        cleaned
+    ):
         courier = "ED"
 
     date_match = re.search(
