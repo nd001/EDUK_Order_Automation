@@ -213,16 +213,41 @@ def parse_delivery_block(text):
 
     courier = None
 
-    courier = None
+    # --------------------------------------------------------
+    # Pre-manifest RPii format
+    # --------------------------------------------------------
 
-# Pre-manifest RPii format
     if "DELIVER SK" in cleaned:
         courier = "SK"
 
     elif "DELIVER ED" in cleaned:
         courier = "ED"
 
-    # Post-manifest RPii format
+    # --------------------------------------------------------
+    # On-manifest RPii format
+    #
+    # Example:
+    # ON MANFST: 67094 D SK
+    # BN:09
+    # 090926:AM • 67094:SGK
+    # --------------------------------------------------------
+
+    elif "ON MANFST:" in cleaned and (
+        " D SK" in cleaned
+        or ":SGK" in cleaned
+    ):
+        courier = "SK"
+
+    elif "ON MANFST:" in cleaned and (
+        " D ED" in cleaned
+        or ":ED" in cleaned
+    ):
+        courier = "ED"
+
+    # --------------------------------------------------------
+    # Delivered RPii format
+    # --------------------------------------------------------
+
     elif re.search(
         r"\bDELVRD\b.*\bSK\b",
         cleaned
@@ -234,7 +259,6 @@ def parse_delivery_block(text):
         cleaned
     ):
         courier = "ED"
-
     date_match = re.search(
         r"(\d{6}):(AM|PM)",
         cleaned
@@ -326,7 +350,37 @@ def read_active_product(sales_frame):
         if candidate_quantity <= 0:
             continue
 
-        sku = sku_text.split()[0]
+        # RPii may display spaces inside the SKU, for example:
+        #
+        #     EY 48SB8 (1 - ...)
+        #
+        # Everything before the quantity section is the SKU.
+        # Remove whitespace from that portion so it can be
+        # compared safely with marketplace/Mirakl SKUs.
+
+        sku_part = re.split(
+            r"\(\s*\d+\s+-",
+            sku_text,
+            maxsplit=1,
+        )[0].strip()
+
+        sku = re.sub(
+            r"\s+",
+            "",
+            sku_part,
+        )
+
+        print()
+        print("RPii SKU PARSE DIAGNOSTIC")
+        print("-" * 60)
+        print(
+            f"Raw SKU cell:    {sku_text}"
+        )
+        print(
+            f"Cleaned SKU:     {sku}"
+        )
+        print("-" * 60)
+
         description = description_text
         quantity = candidate_quantity
 

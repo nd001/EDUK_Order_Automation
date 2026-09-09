@@ -29,6 +29,8 @@ from marketplaces.diy import (
 from messaging import (
     build_sgk_message,
     build_ed_message,
+    build_sgk_sms,
+    build_ed_sms,
 )
 
 from rp2 import (
@@ -59,6 +61,9 @@ TEST_ORDER = None
 # Live Mirakl writes are enabled only after all safety gates pass.
 # The operator must still type the exact SEND <order_id> confirmation.
 LIVE_MIRAKL_SEND_ENABLED = True
+
+SMS_TEST_MODE = False
+SMS_TEST_MOBILE = "my mobile number"
 
 
 
@@ -132,7 +137,7 @@ def complete_mirakl_shipping(
     - Require exact SHIP <order_id> confirmation.
     - Perform exactly one shipment PUT request.
     - Never automatically retry a shipment write.
-    - Read the order back and verify SHIPPED state.
+    - Read the order back and verify the post-shipment state.
     """
 
     shipping_dry_run = build_mirakl_shipping_dry_run(
@@ -196,12 +201,18 @@ def complete_mirakl_shipping(
             "Shipping order number mismatch"
         )
 
-    if shipping_dry_run["current_state"] != "SHIPPING":
+    if (
+        shipping_dry_run["current_state"]
+        != "SHIPPING"
+    ):
         shipping_failures.append(
             "Mirakl order is not in SHIPPING state"
         )
 
-    if shipping_dry_run["target_state"] != "SHIPPED":
+    if (
+        shipping_dry_run["target_state"]
+        != "SHIPPED"
+    ):
         shipping_failures.append(
             "Unexpected target shipping state"
         )
@@ -212,10 +223,14 @@ def complete_mirakl_shipping(
         print("✗ SHIPPING SAFETY CHECK FAILED")
 
         for failure in shipping_failures:
-            print(f"✗ {failure}")
+            print(
+                f"✗ {failure}"
+            )
 
         print()
-        print("NO SHIPPING API WRITE HAS BEEN MADE.")
+        print(
+            "NO SHIPPING API WRITE HAS BEEN MADE."
+        )
 
         input(
             "\nPress ENTER to close..."
@@ -254,11 +269,16 @@ def complete_mirakl_shipping(
 
     print()
     print("=" * 60)
-    print("WARNING: THIS WILL MARK THE ORDER AS SHIPPED")
+    print(
+        "WARNING: THIS WILL MARK THE ORDER AS SHIPPED"
+    )
     print("=" * 60)
 
     print()
-    print("To authorise this exact order, type:")
+    print(
+        "To authorise this exact order, type:"
+    )
+
     print()
     print(expected_confirmation)
 
@@ -275,10 +295,13 @@ def complete_mirakl_shipping(
         print(
             "The confirmation did not exactly match:"
         )
+
         print(expected_confirmation)
 
         print()
-        print("NO SHIPPING API WRITE HAS BEEN MADE.")
+        print(
+            "NO SHIPPING API WRITE HAS BEEN MADE."
+        )
 
         input(
             "\nPress ENTER to close..."
@@ -313,7 +336,10 @@ def complete_mirakl_shipping(
     )
 
     print()
-    print("✓ MIRAKL SHIP REQUEST COMPLETED")
+    print(
+        "✓ MIRAKL SHIP REQUEST COMPLETED"
+    )
+
     print(
         f"Tracking update HTTP: "
         f"{ship_result['tracking_status_code']}"
@@ -385,38 +411,62 @@ def complete_mirakl_shipping(
         "WAITING_DEBIT",
     }
 
+    # --------------------------------------------------------
+    # State verification
+    # --------------------------------------------------------
+
     if verified_state in valid_post_ship_states:
+
         print(
             f"✓ Order has advanced to valid "
             f"post-shipment state: {verified_state}"
         )
+
     else:
+
         print(
             f"✗ Unexpected post-shipment state: "
             f"{verified_state}"
         )
+
         verification_passed = False
 
-        if verified_carrier == expected_carrier:
-            print(
-                "✓ Carrier code is DIR"
-            )
-        else:
-            print(
-                f"✗ Carrier code mismatch "
-                f"(expected {expected_carrier})"
-            )
-            verification_passed = False
+    # --------------------------------------------------------
+    # Carrier verification
+    # --------------------------------------------------------
+
+    if verified_carrier == expected_carrier:
+
+        print(
+            "✓ Carrier code is DIR"
+        )
+
+    else:
+
+        print(
+            f"✗ Carrier code mismatch "
+            f"(expected {expected_carrier})"
+        )
+
+        verification_passed = False
+
+    # --------------------------------------------------------
+    # Tracking verification
+    # --------------------------------------------------------
 
     if verified_tracking == expected_tracking:
+
         print(
             "✓ Tracking number matches order number"
         )
+
     else:
+
         print(
             "✗ Tracking number mismatch "
             f"(expected {expected_tracking})"
         )
+
         verification_passed = False
 
     print("-" * 60)
@@ -450,7 +500,9 @@ def complete_mirakl_shipping(
         raise SystemExit
 
     print()
-    print("✓ POST-SHIP VERIFICATION PASSED")
+    print(
+        "✓ POST-SHIP VERIFICATION PASSED"
+    )
 
     print()
     print("=" * 60)
@@ -1083,22 +1135,27 @@ with sync_playwright() as p:
         print()
         print("✓ SKU MATCH")
 
+        rp2_sku_mismatch = False
+
     else:
 
         print()
-        print("✗ SKU MISMATCH")
+        print("⚠ RPii SKU MISMATCH")
         print()
         print(
-            "STOPPING - no further processing will take place."
+            "RPii does not exactly match the "
+            "marketplace SKU."
+        )
+        print(
+            "Processing will continue to the "
+            "read-only Mirakl validation."
+        )
+        print()
+        print(
+            "NO SKU OVERRIDE HAS BEEN AUTHORISED."
         )
 
-        input(
-            "\nPress ENTER to close..."
-        )
-
-        browser.close()
-
-        raise SystemExit
+        rp2_sku_mismatch = True
 
     # ========================================================
     # READ FINANCIALS
@@ -1213,6 +1270,7 @@ with sync_playwright() as p:
 
         if (
             "DELIVER" in text
+            or "ON MANFST" in text
             or "DELVRD" in text
         ):
             delivery_text = text
@@ -1404,6 +1462,11 @@ with sync_playwright() as p:
         marketplace_order.order_id
     )
 
+    shipping_recipient_name = (
+        mirakl_order.get("customer_name")
+        or delivery_customer["name"]
+    )
+
     print(
         f"Mirakl Order:  "
         f"{mirakl_order['order_id']}"
@@ -1504,65 +1567,85 @@ with sync_playwright() as p:
     # ========================================================
 
     override_used = False
+    override_reason = None
 
-    if can_override_sku_only(
-        safety_result
-    ):
+    excel_sku = safety_values[
+        "excel_sku"
+    ]
 
-        excel_sku = safety_values[
-            "excel_sku"
-        ]
+    rp2_sku = safety_values[
+        "rp2_sku"
+    ]
 
-        rp2_sku = safety_values[
-            "rp2_sku"
-        ]
+    mirakl_sku = safety_values[
+        "mirakl_sku"
+    ]
 
-        mirakl_sku = safety_values[
-            "mirakl_sku"
-        ]
+    # --------------------------------------------------------
+    # Override is available ONLY when:
+    #
+    # - SKU is the only failed safety check
+    # - Marketplace and Mirakl agree exactly
+    # - RPii contains a different SKU representation
+    # --------------------------------------------------------
+
+    rp2_only_sku_difference = (
+        set(safety_failures) == {"SKU"}
+        and excel_sku == mirakl_sku
+        and rp2_sku != excel_sku
+    )
+
+    if rp2_only_sku_difference:
 
         print()
         print("=" * 60)
-        print("MANUAL OVERRIDE AVAILABLE")
+        print("RPii SKU DIFFERENCE - MANUAL OVERRIDE AVAILABLE")
         print("=" * 60)
 
         print(
-            "Marketplace SKU: ",
-            excel_sku
+            f"Marketplace SKU: {excel_sku}"
         )
 
         print(
-            "RPii SKU:      ",
-            rp2_sku
+            f"RPii SKU:        {rp2_sku}"
         )
 
         print(
-            "Mirakl SKU:    ",
-            mirakl_sku
+            f"Mirakl SKU:      {mirakl_sku}"
         )
 
         print()
         print(
-            "Marketplace and RPii agree, but Mirakl "
-            "contains a different SKU."
+            "✓ Marketplace and Mirakl agree."
+        )
+
+        print(
+            "⚠ RPii contains a different SKU representation."
+        )
+
+        expected_override = (
+            f"OVERRIDE SKU {marketplace_order.order_id}"
         )
 
         print()
         print(
-            "Type OVERRIDE to continue with "
-            "this order."
+            "To approve this RPii SKU difference "
+            "for this exact order, type:"
         )
+
+        print()
+        print(expected_override)
 
         confirmation = input(
-            "\nOverride SKU mismatch? "
-        ).strip().upper()
+            "\nSKU override confirmation: "
+        ).strip()
 
-        if confirmation == "OVERRIDE":
+        if confirmation == expected_override:
 
             override_used = True
+            override_reason = "RPii SKU difference"
 
-            # We deliberately remove ONLY the SKU
-            # failure after explicit user approval.
+            # Deliberately remove ONLY the SKU failure.
             safety_failures.remove(
                 "SKU"
             )
@@ -1572,18 +1655,35 @@ with sync_playwright() as p:
                 "⚠ SKU OVERRIDE ACCEPTED"
             )
 
+            print()
             print(
-                "Continuing using the "
-                "Marketplace/RPii SKU."
+                "Marketplace and Mirakl SKU will be "
+                "treated as authoritative for this order."
+            )
+
+            print(
+                f"Approved SKU: {excel_sku}"
+            )
+
+            print(
+                f"RPii SKU:     {rp2_sku}"
             )
 
         else:
 
             print()
             print(
-                "Override not accepted."
+                "✗ SKU OVERRIDE NOT AUTHORISED"
             )
 
+            print()
+            print(
+                "The confirmation did not exactly match:"
+            )
+
+            print(expected_override)
+
+    
     # ========================================================
     # HARD STOP
     # ========================================================
@@ -1633,13 +1733,28 @@ with sync_playwright() as p:
         print()
 
         print(
-            "Using Marketplace/RPii SKU: "
+            "Marketplace SKU: "
             f"{safety_values['excel_sku']}"
         )
 
         print(
-            "Ignoring Mirakl SKU:  "
+            "Mirakl SKU:      "
             f"{safety_values['mirakl_sku']}"
+        )
+
+        print(
+            "RPii SKU:        "
+            f"{safety_values['rp2_sku']}"
+        )
+
+        print()
+
+        print(
+            "✓ Marketplace and Mirakl agree."
+        )
+
+        print(
+            "⚠ RPii SKU difference was manually approved."
         )
 
         print()
@@ -1659,6 +1774,22 @@ with sync_playwright() as p:
         print(
             "Marketplace, RPii and Mirakl agree."
         )
+
+    # ========================================================
+    # CUSTOMER-FACING SKU
+    # ========================================================
+
+    # Customer communications should use the marketplace SKU.
+    #
+    # This is especially important where RPii uses an internal
+    # or extended stock code, e.g.:
+    #
+    # Marketplace / Mirakl: EY48SB8
+    # RPii:                 EY48SB8-80(EY48SB8-80)
+
+    customer_sku = str(
+        marketplace_order.sku
+    ).strip()
 
     customer_message_already_sent = False
 
@@ -2169,6 +2300,87 @@ with sync_playwright() as p:
         # browser.close()
         # raise SystemExit
 
+        # ====================================================
+        # RETURN FROM INVOICE TO EPoS
+        # ====================================================
+
+        print()
+        print("Returning from invoice to EPoS...")
+
+        epos_tab = page.locator(
+            "#SALEStd"
+        )
+
+        if epos_tab.count() != 1:
+
+            print()
+            print(
+                "✗ Could not uniquely identify the EPoS tab."
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        epos_tab.evaluate(
+            "element => element.click()"
+        )
+
+        page.wait_for_timeout(1000)
+
+        # ----------------------------------------------------
+        # Re-acquire SALESFrame.
+        # EPoS reloads the Sales module.
+        # ----------------------------------------------------
+
+        print(
+            "Re-acquiring RPii SALESFrame..."
+        )
+
+        sales_frame = None
+
+        for frame in page.frames:
+
+            if frame.name == "SALESFrame":
+                sales_frame = frame
+                break
+
+        if sales_frame is None:
+
+            print()
+            print(
+                "✗ SALESFrame could not be found "
+                "after returning to EPoS."
+            )
+
+            input(
+                "\nPress ENTER to close..."
+            )
+
+            browser.close()
+            raise SystemExit
+
+        print("✓ SALESFrame re-acquired.")
+
+        # ----------------------------------------------------
+        # Confirm that the current sale has returned.
+        # ----------------------------------------------------
+
+        current_sale_total = sales_frame.locator(
+            "#qh_ordval"
+        )
+
+        current_sale_total.wait_for(
+            state="visible",
+            timeout=10000,
+        )
+
+        print("✓ Returned to EPoS sale.")
+
+       
     # ========================================================
     # BUILD CUSTOMER MESSAGE PREVIEW
     # ========================================================
@@ -2179,6 +2391,18 @@ with sync_playwright() as p:
 
     courier = delivery["courier"]
 
+    # --------------------------------------------------------
+    # Customer-facing delivery details
+    # --------------------------------------------------------
+
+    customer_delivery_details = dict(
+        delivery_customer
+    )
+
+    customer_delivery_details["name"] = (
+        shipping_recipient_name
+    )
+
     if courier == "SK":
 
         customer_date_text = (
@@ -2187,8 +2411,8 @@ with sync_playwright() as p:
         )
 
         customer_message = build_sgk_message(
-            delivery_customer,
-            sku,
+            customer_delivery_details,
+            customer_sku,
             description,
             customer_date_text,
         )
@@ -2201,8 +2425,8 @@ with sync_playwright() as p:
         )
 
         customer_message = build_ed_message(
-            delivery_customer,
-            sku,
+            customer_delivery_details,
+            customer_sku,
             description,
             customer_date_text,
         )
@@ -2221,13 +2445,65 @@ with sync_playwright() as p:
         browser.close()
         raise SystemExit
 
+    # ========================================================
+    # BUILD CUSTOMER SMS PREVIEW
+    # ========================================================
+
+    if courier == "SK":
+
+        customer_sms = build_sgk_sms()
+
+    elif courier == "ED":
+
+        customer_sms = build_ed_sms(
+            sku=customer_sku,
+            delivery_date=customer_date_text,
+        )
+
+    else:
+
+        raise RuntimeError(
+            f"Cannot build SMS for "
+            f"unknown courier: {courier}"
+        )
+
+    print()
+    print("=" * 60)
+    print("CUSTOMER SMS PREVIEW")
+    print("=" * 60)
+
+    print(
+        f"Order:       "
+        f"{marketplace_order.order_id}"
+    )
+
+    print(
+        f"Mobile:      "
+        f"{delivery_customer['telephone']}"
+    )
+
+    print(
+        f"Courier:     {courier}"
+    )
+
+    print()
+    print("-" * 60)
+    print(customer_sms)
+    print("-" * 60)
+
+    print()
+    print(
+        "SMS PREVIEW ONLY - "
+        "NO SMS HAS BEEN SENT."
+    )
+
     print()
     print(
         f"Order:       {marketplace_order.order_id}"
     )
 
     print(
-        f"Customer:    {delivery_customer['name']}"
+        f"Customer:    {shipping_recipient_name}"
     )
 
     print(
@@ -2254,12 +2530,455 @@ with sync_playwright() as p:
     print()
 
     # ========================================================
+    # POPULATE RPii SMS FIELDS - DO NOT SEND
+    # ========================================================
+
+    print()
+    print("Preparing RPii SMS fields...")
+
+    # --------------------------------------------------------
+    # Re-acquire the current RPii Print button.
+    # Returning from the invoice can refresh the Sales module.
+    # --------------------------------------------------------
+
+    current_print_button = sales_frame.locator(
+        'td.tcbw[onclick^="doPrint("]'
+    )
+
+    if current_print_button.count() != 1:
+
+        print()
+        print(
+            f"✗ Expected 1 current Print button, "
+            f"found {current_print_button.count()}."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    # --------------------------------------------------------
+    # Re-acquire the SMS controls from the current Sales frame.
+    # --------------------------------------------------------
+
+    sms_mobile = sales_frame.locator(
+        "#pr_cus_mobile"
+    )
+
+    sms_text = sales_frame.locator(
+        "#del_cus_text"
+    )
+
+    sms_send_button = sales_frame.locator(
+        'img[onclick^="sendText("]'
+    )
+
+    if (
+        not sms_mobile.is_visible()
+        or not sms_text.is_visible()
+    ):
+
+        print(
+            "SMS controls are not currently visible. "
+            "Opening the current RPii Print panel..."
+        )
+
+        current_print_button.evaluate(
+            "element => element.click()"
+        )
+
+        page.wait_for_timeout(1000)
+
+    # --------------------------------------------------------
+    # Safety check after opening Print panel.
+    # --------------------------------------------------------
+
+    print()
+    print("SMS CONTROL STATE AFTER OPENING PRINT")
+    print("-" * 60)
+
+    print(
+        f"Mobile field count:   {sms_mobile.count()}"
+    )
+
+    print(
+        f"Mobile field visible: {sms_mobile.is_visible()}"
+    )
+
+    print(
+        f"Message field count:  {sms_text.count()}"
+    )
+
+    print(
+        f"Message visible:      {sms_text.is_visible()}"
+    )
+
+    print(
+        f"Send button count:    {sms_send_button.count()}"
+    )
+
+    print(
+        f"Send button visible:  {sms_send_button.is_visible()}"
+    )
+
+    print("-" * 60)
+
+    if (
+        not sms_mobile.is_visible()
+        or not sms_text.is_visible()
+        or not sms_send_button.is_visible()
+    ):
+
+        print()
+        print(
+            "✗ RPii SMS controls did not become visible."
+        )
+
+        print()
+        print(
+            "NO SMS HAS BEEN SENT."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    # --------------------------------------------------------
+    # Require the fields to be visible before entering data.
+    # --------------------------------------------------------
+
+    sms_mobile.wait_for(
+        state="visible",
+        timeout=5000,
+    )
+
+    sms_text.wait_for(
+        state="visible",
+        timeout=5000,
+    )
+
+    sms_send_button.wait_for(
+        state="visible",
+        timeout=5000,
+    )
+
+    # --------------------------------------------------------
+    # Select SMS target number
+    # --------------------------------------------------------
+
+    if SMS_TEST_MODE:
+        sms_target_mobile = SMS_TEST_MOBILE
+    else:
+        sms_target_mobile = delivery_customer["telephone"]
+
+    # --------------------------------------------------------
+    # Populate fields only.
+    # NO SMS button click occurs here.
+    # --------------------------------------------------------
+
+    sms_mobile.fill(
+        sms_target_mobile
+    )
+
+    sms_text.fill(
+        customer_sms
+    )
+
+    entered_mobile = sms_mobile.input_value()
+    entered_sms = sms_text.input_value()
+
+    print()
+    print("=" * 60)
+    print("RPii SMS FIELD VERIFICATION")
+    print("=" * 60)
+
+    print(
+        f"Expected mobile: {sms_target_mobile}"
+    )
+
+    print(
+        f"RPii mobile:     {entered_mobile}"
+    )
+
+    print()
+
+    print("Expected SMS:")
+    print("-" * 60)
+    print(customer_sms)
+
+    print()
+    print("RPii SMS field:")
+    print("-" * 60)
+    print(entered_sms)
+
+    print()
+
+    if (
+        entered_mobile
+        == sms_target_mobile
+        and entered_sms
+        == customer_sms
+    ):
+
+        print(
+            "✓ RPii SMS fields match the expected values"
+        )
+
+    else:
+
+        print(
+            "✗ RPii SMS field verification failed"
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    print()
+    print(
+        "SMS FIELDS POPULATED ONLY - "
+        "THE SMS SEND BUTTON HAS NOT BEEN CLICKED."
+    )
+
+    # ========================================================
+    # FINAL RPii SMS SEND GATE
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("FINAL RPii SMS CONFIRMATION")
+    print("=" * 60)
+
+    if SMS_TEST_MODE:
+        print()
+        print("⚠ SMS TEST MODE ACTIVE")
+        print("Customer mobile will NOT be used.")
+        print(
+            f"Test mobile: {sms_target_mobile}"
+        )
+
+    print()
+    print(
+        f"Order:       {marketplace_order.order_id}"
+    )
+
+    print(
+        f"Mobile:      {sms_target_mobile}"
+    )
+
+    print()
+    print("SMS:")
+    print("-" * 60)
+    print(customer_sms)
+    print("-" * 60)
+
+    expected_sms_confirmation = (
+        f"TEXT {marketplace_order.order_id}"
+    )
+
+    print()
+    print(
+        "To authorise this exact SMS, type:"
+    )
+
+    print()
+    print(expected_sms_confirmation)
+    print()
+
+    sms_confirmation = input(
+        "Final SMS confirmation: "
+    ).strip()
+
+    if sms_confirmation != expected_sms_confirmation:
+
+        print()
+        print("✗ SMS NOT AUTHORISED")
+
+        print()
+        print(
+            "The confirmation did not exactly match:"
+        )
+
+        print(expected_sms_confirmation)
+
+        print()
+        print("NO SMS HAS BEEN SENT.")
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+    print()
+    print("✓ SMS AUTHORISATION ACCEPTED")
+
+    # ========================================================
+    # LIVE RPii SMS SEND
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("LIVE RPii SMS SEND")
+    print("=" * 60)
+
+    expected_alert_text = (
+        f"SMS sent to {sms_target_mobile}"
+    )
+
+    print()
+    print(
+        f"Sending SMS to {sms_target_mobile}..."
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT: Click the SMS button ONCE ONLY
+    # --------------------------------------------------------
+
+    sms_send_button.evaluate(
+        "element => element.click()"
+    )
+
+    # --------------------------------------------------------
+    # Verify RPii acknowledgement.
+    #
+    # RPii creates the acknowledgement dynamically inside
+    # .alertDiv. Search every frame because the alert is
+    # generated inside SALESFrame.
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Waiting for RPii SMS acknowledgement..."
+    )
+
+    acknowledgement_found = False
+    acknowledgement_text = ""
+    acknowledgement_frame = ""
+
+    acknowledgement_found = False
+    acknowledgement_text = ""
+    acknowledgement_frame = ""
+
+    # --------------------------------------------------------
+    # RPii creates the acknowledgement dynamically.
+    # Search all frames for the actual alertDiv text.
+    # --------------------------------------------------------
+
+    for attempt in range(20):
+
+        for frame in page.frames:
+
+            try:
+                alert_divs = frame.locator(
+                    ".alertDiv"
+                )
+
+                for i in range(
+                    alert_divs.count()
+                ):
+
+                    text = (
+                        alert_divs.nth(i)
+                        .text_content()
+                        or ""
+                    ).strip()
+
+                    if expected_alert_text in text:
+
+                        acknowledgement_found = True
+                        acknowledgement_text = text
+                        acknowledgement_frame = (
+                            frame.name
+                            or "(unnamed)"
+                        )
+
+                        break
+
+                if acknowledgement_found:
+                    break
+
+            except Exception:
+                continue
+
+        if acknowledgement_found:
+            break
+
+        page.wait_for_timeout(500)
+
+    print()
+
+    if acknowledgement_found:
+
+        print(
+            f"RPii acknowledgement frame: "
+            f"{acknowledgement_frame}"
+        )
+
+        print(
+            f"RPii acknowledgement: "
+            f"{acknowledgement_text}"
+        )
+
+        print()
+        print(
+            "✓ RPii SMS SEND ACKNOWLEDGED"
+        )
+
+        print(
+            f"✓ RPii reported SMS sent to "
+            f"{sms_target_mobile}"
+        )
+
+    else:
+
+        print(
+            "✗ RPii SMS VERIFICATION FAILED"
+        )
+
+        print()
+        print(
+            f"Expected acknowledgement: "
+            f"{expected_alert_text}"
+        )
+
+        print()
+        print(
+            "The SMS send action has already "
+            "been attempted."
+        )
+
+        print(
+            "DO NOT automatically retry it."
+        )
+
+        input(
+            "\nPress ENTER to close..."
+        )
+
+        browser.close()
+        raise SystemExit
+
+   
+
+    
+    # ========================================================
     # MIRAKL SEND PAYLOAD - DRY RUN ONLY
     # ========================================================
 
     dry_run_payload = build_mirakl_dry_run_payload(
         order_id=marketplace_order.order_id,
-        customer_name=customer_name,
+        customer_name=shipping_recipient_name,
         message_body=customer_message,
         invoice_path=invoice_path,
         existing_threads=mirakl_threads["threads"],
@@ -2423,7 +3142,9 @@ with sync_playwright() as p:
     print("-" * 60)
 
     print()
-    print("NOTHING HAS BEEN SENT.")
+    print(
+        "NO MIRAKL MESSAGE HAS BEEN SENT."
+    )
 
      # ========================================================
     # FINAL CUSTOMER COMMUNICATION REVIEW
@@ -2716,12 +3437,13 @@ with sync_playwright() as p:
 
     print()
     print(
-        "The message was sent and has been "
-        "read back successfully from Mirakl."
+        "The Mirakl customer message was sent and "
+        "read back successfully."
     )
 
     input(
-        "\nPress ENTER to close..."
+        "\nCustomer communication is complete. "
+        "Press ENTER to continue to Mirakl shipping..."
     )
 
     complete_mirakl_shipping(

@@ -52,6 +52,7 @@ def build_customer_address(delivery_customer):
     return "\n".join(lines)
 
 
+
 def build_sgk_message(
     delivery_customer,
     product_sku,
@@ -86,7 +87,7 @@ Your item(s) will be collected by SGK Distribution on {collection_date}. Once co
 
 ⚠️ Important: Missed or cancelled deliveries, once a date has been agreed, may incur additional charges. Please ensure someone is available to receive the delivery.
 
-If you have any questions or need further assistance, feel free to contact us.
+If you have any questions regarding your order or delivery, please contact us on 01282 443850 and we will be happy to help.
 
 Kind regards,
 
@@ -136,3 +137,36 @@ If you require any further information please do not hesitate to contact our sal
 Kind Regards,
 
 Electrical Discount UK"""
+
+def build_sgk_sms():
+    """
+    Build the customer SMS for an SGK delivery.
+    """
+
+    return (
+        "Electrical Discount UK: "
+        "Thanks for your B&Q order. "
+        "Your delivery will be made by SGK. "
+        "SGK will contact you directly about delivery. "
+        "We have emailed further information. "
+        "If you have any issues, call 01282 443850."
+    )
+
+
+def build_ed_sms(
+    sku,
+    delivery_date,
+):
+    """
+    Build the customer SMS for an EDUK delivery.
+    """
+
+    return (
+    "Electrical Discount UK: "
+    "Thanks for your B&Q order. "
+    f"Your {sku} is due {delivery_date}, 7am-7pm. "
+    "Further delivery information has been emailed to you. "
+    "We will email an estimated delivery window "
+    "the day before. "
+    "Queries: 01282 443850."
+)   
