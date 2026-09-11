@@ -2458,6 +2458,7 @@ with sync_playwright() as p:
         customer_sms = build_ed_sms(
             sku=customer_sku,
             delivery_date=customer_date_text,
+            description=description,
         )
 
     else:

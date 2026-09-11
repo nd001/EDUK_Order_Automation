@@ -331,8 +331,16 @@ def read_active_product(sales_frame):
             sku_cell.inner_text().split()
         )
 
-        description_text = " ".join(
-            desc_cell.inner_text().split()
+        raw_description_text = (
+            desc_cell.inner_text()
+            or ""
+        )
+
+        description_text = (
+            " ".join(
+                raw_description_text.split()
+            )
+            or None
         )
 
         active_match = re.search(
@@ -378,6 +386,12 @@ def read_active_product(sales_frame):
         )
         print(
             f"Cleaned SKU:     {sku}"
+        )
+        print(
+            f"Raw description: {raw_description_text!r}"
+        )
+        print(
+            f"Description:     {description_text!r}"
         )
         print("-" * 60)
 

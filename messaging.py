@@ -63,9 +63,17 @@ def build_sgk_message(
         delivery_customer
     )
 
-    item_text = (
-        f"{product_sku} - {product_description}"
-    )
+    product_description_text = str(
+        product_description or ""
+    ).strip()
+
+    if product_description_text:
+        item_text = (
+            f"{product_sku} - "
+            f"{product_description_text}"
+        )
+    else:
+        item_text = str(product_sku).strip()
 
     return f"""Good Morning,
 
@@ -106,9 +114,17 @@ def build_ed_message(
         delivery_customer
     )
 
-    item_text = (
-        f"{product_sku} - {product_description}"
-    )
+    product_description_text = str(
+        product_description or ""
+    ).strip()
+
+    if product_description_text:
+        item_text = (
+            f"{product_sku} - "
+            f"{product_description_text}"
+        )
+    else:
+        item_text = str(product_sku).strip()
 
     return f"""Thank you for purchasing from Electrical Discount UK.
 
@@ -156,17 +172,33 @@ def build_sgk_sms():
 def build_ed_sms(
     sku,
     delivery_date,
+    description=None,
 ):
     """
     Build the customer SMS for an EDUK delivery.
+
+    Prefer the RPii product description when available.
+    Fall back safely to the marketplace SKU if the
+    description is missing.
     """
 
+    product_text = str(
+        description or ""
+    ).strip()
+
+    if not product_text:
+        product_text = str(sku or "").strip()
+
+    if not product_text:
+        product_text = "item"
+
     return (
-    "Electrical Discount UK: "
-    "Thanks for your B&Q order. "
-    f"Your {sku} is due {delivery_date}, 7am-7pm. "
-    "Further delivery information has been emailed to you. "
-    "We will email an estimated delivery window "
-    "the day before. "
-    "Queries: 01282 443850."
-)   
+        "Electrical Discount UK: "
+        "Thanks for your B&Q order. "
+        f"Your {product_text} is due "
+        f"{delivery_date}, 7am-7pm. "
+        "Further delivery information has been emailed to you. "
+        "We will email an estimated delivery window "
+        "the day before. "
+        "Queries: 01282 443850."
+    )

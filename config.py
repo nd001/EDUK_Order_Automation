@@ -116,3 +116,13 @@ DIY_DIRECT_DELIVERY_CARRIER_LABEL = (
     "The verified seller will contact you directly "
     "to plan a delivery"
 )
+
+TESCO_MIRAKL_URL = os.getenv(
+    "TESCO_MIRAKL_URL",
+    "https://tescouk-prod.mirakl.net",
+)
+
+TESCO_MIRAKL_API_KEY = os.getenv(
+    "TESCO_MIRAKL_API_KEY",
+    "",
+)
