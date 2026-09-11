@@ -1,7 +1,11 @@
 import os
 import sys
+from datetime import datetime
+
 import requests
 from dotenv import load_dotenv
+
+from marketplaces.tesco import read_tesco_orders
 
 
 # ============================================================
@@ -19,6 +23,8 @@ TESCO_MIRAKL_API_KEY = os.getenv(
     "TESCO_MIRAKL_API_KEY",
     "",
 ).strip()
+
+TESCO_ORDER_FILE = "Tescoorders.xlsx"
 
 GO2STREAM_CARRIER_CODE = "0000"
 GO2STREAM_CARRIER_NAME = "Go2Stream"
@@ -80,6 +86,168 @@ def get_tesco_order(order_id):
         )
 
     return orders[0]
+
+
+# ============================================================
+# TESCO SHIPPING QUEUE
+# ============================================================
+
+def format_ship_by(shipping_deadline):
+    if not shipping_deadline:
+        return "-"
+
+    try:
+        value = str(shipping_deadline).strip()
+
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        return datetime.fromisoformat(
+            value
+        ).strftime("%d/%m/%Y")
+
+    except (TypeError, ValueError):
+        return "REVIEW"
+
+
+def load_tracking_queue():
+    """
+    Read the current Tesco spreadsheet and enrich each order
+    with its live Tesco Mirakl state.
+
+    READ ONLY.
+    """
+
+    spreadsheet_orders = read_tesco_orders(
+        TESCO_ORDER_FILE
+    )
+
+    queue = []
+
+    for spreadsheet_order in spreadsheet_orders:
+        try:
+            mirakl_order = get_tesco_order(
+                spreadsheet_order.order_id
+            )
+
+            state = str(
+                mirakl_order.get("order_state") or ""
+            ).strip().upper()
+
+            ship_by = format_ship_by(
+                mirakl_order.get("shipping_deadline")
+            )
+
+            if state == "SHIPPING":
+                status = "NEEDS SHIPPING"
+            elif state == "SHIPPED":
+                status = "COMPLETE"
+            else:
+                status = "REVIEW"
+
+            queue.append({
+                "spreadsheet_order": spreadsheet_order,
+                "mirakl_order": mirakl_order,
+                "state": state or "-",
+                "ship_by": ship_by,
+                "status": status,
+            })
+
+        except Exception as exc:
+            queue.append({
+                "spreadsheet_order": spreadsheet_order,
+                "mirakl_order": None,
+                "state": "ERROR",
+                "ship_by": "-",
+                "status": "REVIEW",
+                "error": str(exc),
+            })
+
+    return queue
+
+
+def print_tracking_queue(queue):
+    print()
+    print("=" * 112)
+    print("TESCO TRACKING / SHIPPING QUEUE")
+    print("=" * 112)
+
+    print(
+        f"{'':>3} "
+        f"{'ORDER':<20} "
+        f"{'SKU':<20} "
+        f"{'PRICE':>10}   "
+        f"{'MIRAKL STATE':<15} "
+        f"{'SHIP BY':<12} "
+        f"{'STATUS':<16}"
+    )
+
+    print("-" * 112)
+
+    for index, item in enumerate(
+        queue,
+        start=1,
+    ):
+        order = item["spreadsheet_order"]
+
+        print(
+            f"{index:>2}. "
+            f"{order.order_id:<20} "
+            f"{order.sku:<20} "
+            f"£{order.price:>8.2f}   "
+            f"{item['state']:<15} "
+            f"{item['ship_by']:<12} "
+            f"{item['status']:<16}"
+        )
+
+    print("=" * 112)
+    print()
+    print(
+        "Only orders marked NEEDS SHIPPING can be selected."
+    )
+
+
+def select_tracking_queue_order(queue):
+    selectable = {
+        index: item
+        for index, item in enumerate(
+            queue,
+            start=1,
+        )
+        if item["state"] == "SHIPPING"
+    }
+
+    if not selectable:
+        print()
+        print("✓ No Tesco orders currently need shipping.")
+        return None
+
+    while True:
+        selection = input(
+            "\nSelect order number to ship "
+            "(or Q to quit): "
+        ).strip()
+
+        if selection.upper() == "Q":
+            return None
+
+        try:
+            selection_number = int(selection)
+        except ValueError:
+            print(
+                "Please enter a queue number "
+                "or Q to quit."
+            )
+            continue
+
+        if selection_number not in selectable:
+            print(
+                "That order is not marked NEEDS SHIPPING. "
+                "Please select one of the SHIPPING orders."
+            )
+            continue
+
+        return selectable[selection_number]
 
 
 # ============================================================
@@ -375,19 +543,33 @@ def main():
     )
     print()
 
-    order_id = input(
-        "Enter Tesco order ID: "
-    ).strip()
+    print(
+        f"Reading Tesco order queue from "
+        f"{TESCO_ORDER_FILE}..."
+    )
 
-    if not order_id:
-        print("No order ID entered.")
-        sys.exit(1)
+    queue = load_tracking_queue()
+
+    print_tracking_queue(queue)
+
+    selected = select_tracking_queue_order(
+        queue
+    )
+
+    if selected is None:
+        print()
+        print("No order selected.")
+        return
+
+    spreadsheet_order = selected[
+        "spreadsheet_order"
+    ]
+    order = selected["mirakl_order"]
+    order_id = spreadsheet_order.order_id
 
     print()
-    print("Reading Tesco Mirakl order...")
+    print(f"Selected Tesco order: {order_id}")
     print()
-
-    order = get_tesco_order(order_id)
 
     if order.get("order_id") != order_id:
         raise RuntimeError(
