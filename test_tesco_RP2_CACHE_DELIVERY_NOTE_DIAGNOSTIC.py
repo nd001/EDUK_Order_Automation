@@ -1,8 +1,11 @@
+import json
 import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 from config import (
@@ -26,6 +29,7 @@ from marketplaces.tesco import (
 
 from rp2 import (
     extract_web_ref,
+    extract_rp2_order_number,
     extract_customer_name,
     extract_delivery_customer,
     extract_uk_postcode,
@@ -46,7 +50,165 @@ from messaging import (
 )
 
 
+load_dotenv()
+
+RPII_USERNAME = os.getenv("RPII_USERNAME")
+RPII_PASSWORD = os.getenv("RPII_PASSWORD")
+
+
 TESCO_ORDER_FILE = "Tescoorders.xlsx"
+
+TESCO_RP2_CACHE_FILE = (
+    Path(__file__).resolve().parent
+    / "tesco_rp2_tracking_cache.json"
+)
+
+
+
+def write_tesco_rp2_tracking_cache(
+    order_id,
+    rp2_order_number,
+    rp2_courier,
+):
+    """
+    Persist only the RPii/Stream details required by the later
+    Tesco tracking-completion script.
+
+    This is called only after the Tesco Mirakl delivery message
+    has been successfully read back and verified.
+    """
+
+    order_id = str(order_id or "").strip()
+    rp2_order_number = str(rp2_order_number or "").strip()
+    rp2_courier = str(rp2_courier or "").strip().upper()
+
+    if not order_id:
+        raise ValueError("Cannot cache a blank Tesco order ID.")
+
+    if not rp2_order_number:
+        raise ValueError(
+            "Cannot cache a blank RPii / Stream order number."
+        )
+
+    if rp2_courier == "SK":
+        stream_courier = "SGK"
+    elif rp2_courier == "ED":
+        stream_courier = "ED"
+    else:
+        raise ValueError(
+            f"Cannot cache unrecognised RPii courier: "
+            f"{rp2_courier!r}"
+        )
+
+    cache = {}
+
+    if TESCO_RP2_CACHE_FILE.exists():
+        try:
+            with TESCO_RP2_CACHE_FILE.open(
+                "r",
+                encoding="utf-8",
+            ) as file:
+                loaded = json.load(file)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Existing Tesco RPii tracking cache is not "
+                "valid JSON. It has NOT been overwritten."
+            ) from exc
+
+        if not isinstance(loaded, dict):
+            raise RuntimeError(
+                "Existing Tesco RPii tracking cache does not "
+                "contain a JSON object. It has NOT been overwritten."
+            )
+
+        cache = loaded
+
+    cache[order_id] = {
+        "rp2_order_number": rp2_order_number,
+        "courier": stream_courier,
+        "cached_at": datetime.now().isoformat(
+            timespec="seconds"
+        ),
+        "message_verified": True,
+        "tracking_completed": False,
+    }
+
+    temp_file = TESCO_RP2_CACHE_FILE.with_suffix(
+        ".json.tmp"
+    )
+
+    with temp_file.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            cache,
+            file,
+            indent=2,
+            sort_keys=True,
+        )
+        file.write("\n")
+
+    temp_file.replace(TESCO_RP2_CACHE_FILE)
+
+def read_tesco_processing_cache():
+    """
+    Read the Tesco RPii tracking cache for queue/status purposes only.
+
+    READ ONLY:
+    - Does not modify the cache.
+    - Does not contact RPii.
+    - Does not contact Go2Stream.
+    - Does not perform any marketplace write.
+    """
+
+    if not TESCO_RP2_CACHE_FILE.exists():
+        return {}
+
+    try:
+        with TESCO_RP2_CACHE_FILE.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            cache = json.load(file)
+
+    except (json.JSONDecodeError, OSError) as exc:
+        print()
+        print("⚠ TESCO PROCESSING CACHE COULD NOT BE READ")
+        print(str(exc))
+        print()
+        print(
+            "For safety, no orders will be treated as "
+            "previously processed from the local cache."
+        )
+        return {}
+
+    if not isinstance(cache, dict):
+        print()
+        print("⚠ TESCO PROCESSING CACHE HAS INVALID FORMAT")
+        print(
+            "For safety, no orders will be treated as "
+            "previously processed from the local cache."
+        )
+        return {}
+
+    return cache
+
+
+def is_tesco_message_verified(order_id, cache):
+    """
+    Return True only when this exact Tesco order has a cache
+    entry explicitly marked message_verified=True.
+    """
+
+    order_id = str(order_id or "").strip()
+
+    entry = cache.get(order_id)
+
+    if not isinstance(entry, dict):
+        return False
+
+    return entry.get("message_verified") is True
 
 
 def get_customer_surname(full_name):
@@ -72,6 +234,309 @@ def get_customer_surname(full_name):
 
     return surname.title()
 
+
+
+def format_tesco_delivery_deadline(mirakl_order):
+    """
+    Return Tesco Mirakl's latest customer delivery date as DD/MM/YYYY.
+
+    IMPORTANT:
+    This uses the customer delivery window (delivery_date.latest),
+    NOT Mirakl's shipping_deadline.
+    """
+
+    delivery_date = mirakl_order.get("delivery_date")
+
+    if isinstance(delivery_date, dict):
+        delivery_deadline_raw = delivery_date.get("latest")
+    else:
+        delivery_deadline_raw = None
+
+    # Compatibility fallback in case the Tesco adapter is later changed
+    # to expose the same flattened field used by the B&Q adapter.
+    if not delivery_deadline_raw:
+        delivery_deadline_raw = mirakl_order.get(
+            "delivery_date_latest"
+        )
+
+    if not delivery_deadline_raw:
+        raise RuntimeError(
+            "Tesco Mirakl did not return delivery_date.latest.\n"
+            "The RPii Delivery Notes have NOT been changed."
+        )
+
+    deadline_value = str(delivery_deadline_raw).strip()
+
+    if deadline_value.endswith("Z"):
+        deadline_value = deadline_value[:-1] + "+00:00"
+
+    try:
+        return datetime.fromisoformat(
+            deadline_value
+        ).strftime("%d/%m/%Y")
+    except ValueError as exc:
+        raise RuntimeError(
+            "Tesco Mirakl delivery_date.latest could not be "
+            "converted to DD/MM/YYYY.\n"
+            f"Raw value: {delivery_deadline_raw!r}\n"
+            "The RPii Delivery Notes have NOT been changed."
+        ) from exc
+
+
+def add_tesco_rp2_delivery_deadline_note(
+    sales_frame,
+    mirakl_order,
+):
+    """
+    Add the Tesco Mirakl delivery deadline to RPii Delivery Notes.
+
+    Safety behaviour:
+    - Preserve existing Delivery Notes.
+    - Do not add the same deadline note twice.
+    - Replace only an older automated deadline line.
+    - Respect RPii's 1000-character Delivery Notes limit.
+    - Click Save Notes once only.
+    - Re-open notes and verify the saved text.
+    """
+
+    delivery_deadline = format_tesco_delivery_deadline(
+        mirakl_order
+    )
+
+    deadline_note = (
+        "**** IMPORTANT - DELIVERY DEADLINE - "
+        f"{delivery_deadline} ****"
+    )
+
+    print()
+    print("=" * 70)
+    print("TESCO RPii DELIVERY DEADLINE NOTE")
+    print("=" * 70)
+    print(
+        f"Mirakl delivery deadline: {delivery_deadline}"
+    )
+    print(
+        f"Required RPii note:       {deadline_note}"
+    )
+
+    add_notes_button = sales_frame.locator(
+        'img[title="Add notes to sale"]'
+    )
+
+    if add_notes_button.count() != 1:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "Could not uniquely identify the RPii "
+            "'Add notes to sale' button."
+        )
+
+    print()
+    print("Opening RPii Delivery Notes...")
+
+    add_notes_button.evaluate(
+        "element => element.click()"
+    )
+
+    delivery_note_field = sales_frame.locator(
+        "#tDelNote"
+    )
+
+    delivery_note_field.wait_for(
+        state="visible",
+        timeout=10000,
+    )
+
+    existing_note = (
+        delivery_note_field.input_value()
+        or ""
+    ).strip()
+
+    if deadline_note in existing_note:
+        print()
+        print(
+            "✓ Correct delivery deadline note already exists."
+        )
+        print("No RPii note write is required.")
+
+        try:
+            delivery_note_field.evaluate(
+                "element => closeAlert()"
+            )
+        except Exception:
+            pass
+
+        return deadline_note
+
+    deadline_pattern = re.compile(
+        r"^\*\*\*\* IMPORTANT - DELIVERY DEADLINE - "
+        r"\d{2}/\d{2}/\d{4} \*\*\*\*$",
+        re.MULTILINE,
+    )
+
+    if deadline_pattern.search(existing_note):
+        new_note = deadline_pattern.sub(
+            deadline_note,
+            existing_note,
+            count=1,
+        )
+        print()
+        print(
+            "Existing automated delivery deadline found."
+        )
+        print(
+            "It will be replaced; all other Delivery Notes "
+            "will be preserved."
+        )
+    elif existing_note:
+        new_note = (
+            existing_note.rstrip()
+            + "\n"
+            + deadline_note
+        )
+    else:
+        new_note = deadline_note
+
+    if len(new_note) > 1000:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "Adding the delivery deadline would exceed "
+            "RPii's 1000-character Delivery Notes limit.\n"
+            "No RPii note has been saved."
+        )
+
+    print()
+    print("Existing Delivery Notes:")
+    print("-" * 70)
+    print(existing_note or "(blank)")
+    print("-" * 70)
+    print()
+    print("New Delivery Notes:")
+    print("-" * 70)
+    print(new_note)
+    print("-" * 70)
+
+    delivery_note_field.fill(new_note)
+
+    entered_note = (
+        delivery_note_field.input_value()
+        or ""
+    )
+
+    if entered_note != new_note:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "RPii Delivery Notes field did not contain "
+            "the expected text before saving.\n"
+            "Save Notes has NOT been clicked."
+        )
+
+    save_notes_button = sales_frame.locator(
+        'img[onclick*="saveCustNote("]'
+        '[onclick*="closeAlert()"]'
+    )
+
+    save_button_count = save_notes_button.count()
+
+    if save_button_count != 1:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "Could not uniquely identify the RPii "
+            "Save Notes button.\n"
+            f"Matching controls found: {save_button_count}\n"
+            "The note has NOT been saved."
+        )
+
+    print()
+    print("Saving RPii Delivery Notes...")
+    print("One Save Notes click only.")
+
+    save_notes_button.evaluate(
+        "element => element.click()"
+    )
+
+    try:
+        delivery_note_field.wait_for(
+            state="hidden",
+            timeout=10000,
+        )
+    except Exception:
+        pass
+
+    print("✓ Save Notes action submitted.")
+    print("Waiting for RPii to finish saving...")
+    time.sleep(1.0)
+    print("Re-opening Delivery Notes to verify...")
+
+    add_notes_button = sales_frame.locator(
+        'img[title="Add notes to sale"]'
+    )
+
+    add_notes_button.evaluate(
+        "element => element.click()"
+    )
+
+    verification_field = sales_frame.locator(
+        "#tDelNote"
+    )
+
+    verification_field.wait_for(
+        state="visible",
+        timeout=10000,
+    )
+
+    verification_deadline = time.monotonic() + 10.0
+    saved_note = ""
+
+    while time.monotonic() < verification_deadline:
+        saved_note = (
+            verification_field.input_value()
+            or ""
+        )
+
+        if saved_note == new_note:
+            break
+
+        time.sleep(0.5)
+
+    if saved_note != new_note:
+        print()
+        print("=" * 70)
+        print("RPii DELIVERY NOTES READ-BACK DIAGNOSTIC")
+        print("=" * 70)
+        print("Expected saved note:")
+        print(repr(new_note))
+        print()
+        print("RPii read-back:")
+        print(repr(saved_note))
+        print()
+        print(f"Expected length: {len(new_note)}")
+        print(f"Read-back length: {len(saved_note)}")
+        print("=" * 70)
+
+        raise RuntimeError(
+            "RPii Delivery Notes save could not be exactly "
+            "verified after waiting for the saved value.\n"
+            "The Save Notes action may already have occurred.\n"
+            "DO NOT automatically retry the note write."
+        )
+
+    print()
+    print("✓ RPii DELIVERY DEADLINE NOTE VERIFIED")
+    print(f"  {deadline_note}")
+
+    try:
+        verification_field.evaluate(
+            "element => closeAlert()"
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "The deadline note was verified as saved, but "
+            "the RPii notes window could not be closed "
+            "cleanly after verification.\n"
+            f"Reason: {exc}"
+        ) from exc
+
+    return deadline_note
 
 def build_tesco_sgk_sms():
     """Build the Tesco customer SMS for SGK deliveries."""
@@ -102,6 +567,43 @@ def build_tesco_ed_sms(description, delivery_date):
         "the day before. "
         "Queries: 01282 443850."
     )
+
+
+def ensure_rpii_login(page):
+    """
+    Automatically log into the RPii application if the
+    RPii sign-in form is displayed.
+
+    The remote HTTP authentication is handled separately
+    by RP2_REMOTE_USERNAME / RP2_REMOTE_PASSWORD.
+    """
+
+    login_box = page.locator('input[name="login"]')
+
+    if login_box.count() > 0 and login_box.is_visible():
+        print("RPii login page detected.")
+
+        if not RPII_USERNAME or not RPII_PASSWORD:
+            raise RuntimeError(
+                "RPII_USERNAME / RPII_PASSWORD are missing from .env"
+            )
+
+        print("Logging into RPii...")
+
+        login_box.fill(RPII_USERNAME)
+        page.locator('input[name="password"]').fill(
+            RPII_PASSWORD
+        )
+        page.locator('button[name="doLogin"]').click()
+
+        page.wait_for_load_state(
+            "domcontentloaded"
+        )
+
+        print("✓ RPii login submitted.")
+
+    else:
+        print("✓ RPii login not required.")
 
 
 # ============================================================
@@ -192,6 +694,7 @@ def get_tesco_queue_mirakl_status(order):
 
 def print_tesco_queue(orders):
 
+    processing_cache = read_tesco_processing_cache()
     print()
     print("=" * 112)
     print("TESCO ORDER QUEUE")
@@ -218,6 +721,30 @@ def print_tesco_queue(orders):
             order
         )
 
+        message_verified = is_tesco_message_verified(
+        order.order_id,
+        processing_cache,
+        )
+
+        mirakl_state = str(
+            mirakl_status.get("state") or ""
+        ).strip().upper()
+
+        if mirakl_state == "SHIPPED":
+            queue_status = "✓ COMPLETE"
+
+        elif (
+            mirakl_state == "SHIPPING"
+            and message_verified
+        ):
+            queue_status = "WAITING FOR TRACKING"
+
+        elif mirakl_state == "SHIPPING":
+            queue_status = "NEW ORDER"
+
+        else:
+            queue_status = mirakl_status["status"]
+
         print(
             f"{index:>2}. "
             f"{order.order_id:<20} "
@@ -225,7 +752,7 @@ def print_tesco_queue(orders):
             f"£{order.price:>8.2f}   "
             f"{mirakl_status['state']:<15} "
             f"{mirakl_status['ship_by']:<12} "
-            f"{mirakl_status['status']:<12}"
+            f"{queue_status:<22}"
         )
 
     print("=" * 112)
@@ -398,6 +925,8 @@ def inspect_tesco_order_in_rp2(order):
                     wait_until="domcontentloaded",
                     timeout=30000
                 )
+
+                ensure_rpii_login(page)
 
                 print(
                     "Outer RPii page loaded. "
@@ -1404,6 +1933,40 @@ def inspect_tesco_order_in_rp2(order):
         print("=" * 60)
 
         # ====================================================
+        # ADD TESCO DELIVERY DEADLINE TO RPii DELIVERY NOTES
+        # ====================================================
+        #
+        # This occurs only after the existing three-way safety
+        # gate has passed and the delivery route is recognised.
+        # It uses Mirakl delivery_date.latest, NOT shipping_deadline.
+        # Any uncertainty stops processing before invoice / SMS.
+        # ====================================================
+
+        try:
+            add_tesco_rp2_delivery_deadline_note(
+                sales_frame=sales_frame,
+                mirakl_order=mirakl_order,
+            )
+        except Exception as exc:
+            print()
+            print("=" * 60)
+            print("✗ TESCO RPii DELIVERY DEADLINE NOTE FAILED")
+            print("=" * 60)
+            print(str(exc))
+            print()
+            print(
+                "For safety, Tesco processing will stop here."
+            )
+            print(
+                "No invoice / SMS / Mirakl customer message "
+                "will be created or sent."
+            )
+            print("=" * 60)
+            input("\nPress ENTER to close...")
+            browser.close()
+            return
+
+        # ====================================================
         # TESCO INVOICE GENERATION
         # ====================================================
 
@@ -2164,7 +2727,7 @@ def inspect_tesco_order_in_rp2(order):
 
         else:
 
-            print("✗ RPii SMS VERIFICATION FAILED")
+            print("✗ RPii SMS AUTOMATIC VERIFICATION FAILED")
             print()
             print(
                 f"Expected acknowledgement: "
@@ -2175,12 +2738,47 @@ def inspect_tesco_order_in_rp2(order):
                 "The SMS send action has already been attempted."
             )
             print(
-                "DO NOT automatically retry it."
+                "DO NOT send the SMS again."
             )
 
-            input("\nPress ENTER to close...")
-            browser.close()
-            return
+            print()
+            print("=" * 60)
+            print("MANUAL SMS VERIFICATION")
+            print("=" * 60)
+
+            print()
+            print(
+                "If you have personally confirmed that the SMS "
+                "was successfully sent, type:"
+            )
+            print()
+            print("SMS VERIFIED")
+            print()
+
+            manual_verification = input(
+                "Confirmation: "
+            ).strip()
+
+            if manual_verification != "SMS VERIFIED":
+
+                print()
+                print("✗ SMS NOT VERIFIED")
+                print()
+                print(
+                    "The Tesco process will stop here."
+                )
+
+                input("\nPress ENTER to close...")
+                browser.close()
+                return
+
+            print()
+            print(
+                "✓ SMS MANUALLY VERIFIED"
+            )
+            print(
+                "Continuing Tesco processing..."
+            )
 
         # ====================================================
         # TESCO MIRAKL CUSTOMER MESSAGE PREVIEW
@@ -2608,6 +3206,68 @@ def inspect_tesco_order_in_rp2(order):
             print()
             print("✓ TESCO MIRAKL MESSAGE SEND VERIFIED")
 
+            # ------------------------------------------------
+            # CACHE RPii / STREAM DETAILS FOR LATER TRACKING
+            # ------------------------------------------------
+            #
+            # Important: this happens only after the customer
+            # delivery message and invoice attachment have been
+            # read back from Tesco Mirakl and verified.
+            #
+            # Cache failure must never cause a customer message
+            # to be resent. RPii remains the tracking-script
+            # fallback if this auxiliary cache cannot be written.
+            #
+
+            try:
+                rp2_stream_order_number = (
+                    extract_rp2_order_number(
+                        web_panel_text
+                    )
+                )
+
+                if not rp2_stream_order_number:
+                    raise RuntimeError(
+                        "RPii / Stream order number could not "
+                        "be extracted from the verified sale."
+                    )
+
+                write_tesco_rp2_tracking_cache(
+                    order_id=order.order_id,
+                    rp2_order_number=rp2_stream_order_number,
+                    rp2_courier=courier,
+                )
+
+                print()
+                print("✓ RPii tracking details cached")
+                print(
+                    f"  Tesco order:       {order.order_id}"
+                )
+                print(
+                    f"  RPii/Stream order: "
+                    f"{rp2_stream_order_number}"
+                )
+                print(
+                    f"  Stream courier:    "
+                    f"{'SGK' if courier == 'SK' else 'ED'}"
+                )
+                print(
+                    f"  Cache file:        "
+                    f"{TESCO_RP2_CACHE_FILE.name}"
+                )
+
+            except Exception as exc:
+                print()
+                print(
+                    "⚠ CUSTOMER MESSAGE IS VERIFIED, "
+                    "BUT RPii CACHE WRITE FAILED"
+                )
+                print(str(exc))
+                print(
+                    "No customer communication will be retried. "
+                    "The tracking script can fall back to RPii."
+                )
+
         print()
         print("=" * 60)
         print("TESCO GUARDED MESSAGE TEST COMPLETE")
@@ -2642,6 +3302,125 @@ def main():
     show_selected_order(
         selected_order
     )
+
+    # ========================================================
+    # PREVIOUSLY-PROCESSED ORDER SAFETY GUARD
+    # ========================================================
+    #
+    # This guard runs BEFORE RPii processing begins.
+    #
+    # A cache entry is trusted only when this exact Tesco
+    # order is explicitly marked message_verified=True.
+    #
+    # No RPii, Go2Stream or marketplace write occurs here.
+    # ========================================================
+
+    processing_cache = read_tesco_processing_cache()
+
+    if is_tesco_message_verified(
+        selected_order.order_id,
+        processing_cache,
+    ):
+        print()
+        print("=" * 60)
+        print("TESCO ORDER ALREADY PROCESSED")
+        print("=" * 60)
+        print()
+        print(
+            f"Order: {selected_order.order_id}"
+        )
+        print()
+        print(
+            "✓ Customer communication previously verified"
+        )
+        print(
+            "⏳ Waiting for tracking"
+        )
+        print()
+        print(
+            "The invoice / SMS / Tesco message process "
+            "will NOT run again."
+        )
+        print()
+        print(
+            "Use the Tesco tracking script to complete "
+            "this order when tracking becomes available."
+        )
+        print()
+        print("=" * 60)
+
+        input("\nPress ENTER to close...")
+        return
+
+    # ========================================================
+    # PRE-RPii MIRAKL COMMUNICATION SAFETY CHECK - READ ONLY
+    # ========================================================
+    #
+    # This closes the cache-write-failure gap. If customer
+    # communication already exists in Tesco Mirakl but the
+    # local cache entry is missing, do NOT enter RPii processing.
+    #
+    # This performs one READ-ONLY Mirakl thread lookup for the
+    # selected uncached order. Any lookup failure fails closed.
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("TESCO PRE-RPii COMMUNICATION SAFETY CHECK")
+    print("=" * 60)
+    print("Reading existing Tesco Mirakl conversation...")
+
+    try:
+        mirakl_threads = read_tesco_mirakl_threads(
+            selected_order.order_id
+        )
+    except Exception as exc:
+        print()
+        print("✗ TESCO MIRAKL THREAD LOOKUP FAILED")
+        print(str(exc))
+        print()
+        print("⚠ REVIEW REQUIRED")
+        print()
+        print(
+            "For safety, RPii processing will NOT begin because "
+            "existing customer communication could not be checked."
+        )
+        print()
+        print("NO RPii / SMS / Mirakl write action has been attempted.")
+        print("=" * 60)
+        input("\nPress ENTER to close...")
+        return
+
+    existing_threads = mirakl_threads.get("threads", [])
+    existing_messages = mirakl_threads.get("messages", [])
+
+    if existing_threads or existing_messages:
+        print()
+        print("⚠ EXISTING MIRAKL COMMUNICATION DETECTED")
+        print()
+        print(f"Order:             {selected_order.order_id}")
+        print(f"Existing threads:  {len(existing_threads)}")
+        print(f"Existing messages: {len(existing_messages)}")
+        print()
+        print("⚠ REVIEW REQUIRED")
+        print()
+        print(
+            "This order is not in the verified local cache, but "
+            "Tesco Mirakl already contains customer communication."
+        )
+        print(
+            "The invoice / SMS / Tesco message process will NOT run."
+        )
+        print()
+        print("Check this order manually before taking any further action.")
+        print("=" * 60)
+        input("\nPress ENTER to close...")
+        return
+
+    print()
+    print("✓ No existing Tesco Mirakl communication found")
+    print("✓ CLEAR TO ENTER EXISTING RPii SAFETY PROCESS")
+    print("=" * 60)
 
     inspect_tesco_order_in_rp2(
         selected_order

@@ -3,11 +3,33 @@ import re
 import sys
 
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
-
-STREAM_ORDER_SEARCH_URL = (
-    "https://www.go2stream.net/stream/live/cons/view/OrderView.php"
+from playwright.sync_api import (
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
 )
+
+STREAM_ORDER_SEARCH_URLS = {
+    "SGK": (
+        "https://www.go2stream.net/stream/live/cons/view/OrderView.php"
+    ),
+    "ED": (
+        "https://live.go2stream.net/stream/cons/view/OrderView.php"
+    ),
+}
+
+# Backward-compatible SGK alias.
+STREAM_ORDER_SEARCH_URL = STREAM_ORDER_SEARCH_URLS["SGK"]
+
+
+def get_stream_order_search_url(courier):
+    courier = str(courier or "").strip().upper()
+
+    if courier not in STREAM_ORDER_SEARCH_URLS:
+        raise ValueError(
+            "Courier must be SGK or ED."
+        )
+
+    return STREAM_ORDER_SEARCH_URLS[courier]
 
 STATUS_SEQUENCE = [
     ("UNCONFIRMED", "Unconfirmed"),
@@ -245,17 +267,31 @@ def find_matching_result(page, order_number, postcode):
     return matches[0]
 
 
-def ensure_order_search_page(page):
+def ensure_order_search_page(
+    page,
+    courier="SGK",
+):
     """
-    Make sure Stream Order Search is loaded without unnecessarily
-    navigating when Stream has just redirected there after login.
+    Make sure the correct courier's Stream Order Search is loaded.
+
+    SGK and ED use different Stream hosts.
     """
-    if "OrderView.php" in page.url:
+    expected_url = get_stream_order_search_url(courier)
+    expected_host = expected_url.split("/")[2].lower()
+
+    current_host = ""
+    if "://" in page.url:
+        current_host = page.url.split("/")[2].lower()
+
+    if (
+        "OrderView.php" in page.url
+        and current_host == expected_host
+    ):
         page.wait_for_load_state("domcontentloaded")
         return
 
     page.goto(
-        STREAM_ORDER_SEARCH_URL,
+        expected_url,
         wait_until="domcontentloaded",
     )
 
@@ -307,12 +343,20 @@ def open_stream_search_form(page):
     return search_modal
 
 
-def run_stream_search(page, order_number, postcode):
+def run_stream_search(
+    page,
+    order_number,
+    postcode,
+    courier="SGK",
+):
     for status_value, status_label in STATUS_SEQUENCE:
         print()
         print(f"Searching Stream status: {status_label}")
 
-        ensure_order_search_page(page)
+        ensure_order_search_page(
+            page,
+            courier=courier,
+        )
         search_modal = open_stream_search_form(page)
 
         search_modal.locator(
@@ -438,6 +482,16 @@ def main():
     )
     print()
 
+    while True:
+        courier = input(
+            "Courier (SGK/ED): "
+        ).strip().upper()
+
+        if courier in {"SGK", "ED"}:
+            break
+
+        print("Please enter SGK or ED.")
+
     order_number = input(
         "Enter RPii / Stream order number: "
     ).strip()
@@ -463,22 +517,33 @@ def main():
         print("Opening Stream...")
         print()
 
+        stream_order_search_url = (
+            get_stream_order_search_url(courier)
+        )
+
         page.goto(
-            STREAM_ORDER_SEARCH_URL,
+            stream_order_search_url,
             wait_until="domcontentloaded",
         )
 
-        login_to_stream_if_required(page)
+        login_to_stream_if_required(
+            page,
+            courier=courier,
+        )
 
         # After login Stream may redirect elsewhere before settling.
         page.wait_for_timeout(1000)
 
-        ensure_order_search_page(page)
+        ensure_order_search_page(
+            page,
+            courier=courier,
+        )
 
         match, status_label = run_stream_search(
             page,
             order_number,
             postcode,
+            courier=courier,
         )
 
         if match is None:

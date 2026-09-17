@@ -2,6 +2,19 @@ import os
 import re
 import time
 
+import os
+import re
+import time
+
+from pathlib import Path
+from dotenv import load_dotenv
+
+ENV_FILE = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=ENV_FILE)
+
+RPII_USERNAME = os.getenv("RPII_USERNAME")
+RPII_PASSWORD = os.getenv("RPII_PASSWORD")
+
 from playwright.sync_api import sync_playwright
 
 from config import (
@@ -18,6 +31,7 @@ from config import (
 
 from marketplaces.diy import (
     DIYMarketplaceAdapter,
+    read_mirakl_shipping_orders,
     read_mirakl_order,
     read_mirakl_threads,
     build_mirakl_dry_run_payload,
@@ -71,6 +85,41 @@ SMS_TEST_MOBILE = "my mobile number"
 # HELPER FUNCTIONS
 # ============================================================
 
+def ensure_rpii_login(page):
+    """
+    Automatically logs into RPii if the login screen is displayed.
+    If already logged in, continues without doing anything.
+    """
+
+    login_box = page.locator('input[name="login"]')
+
+    try:
+        if login_box.count() > 0 and login_box.is_visible():
+            print("RPii login page detected.")
+
+            if not RPII_USERNAME or not RPII_PASSWORD:
+                raise RuntimeError(
+                    "RPii username/password are missing from the .env file."
+                )
+
+            print("Logging into RPii...")
+
+            login_box.fill(RPII_USERNAME)
+            page.locator('input[name="password"]').fill(RPII_PASSWORD)
+
+            page.locator('button[name="doLogin"]').click()
+
+            page.wait_for_load_state("domcontentloaded")
+
+            print("✓ RPii login submitted.")
+
+        else:
+            print("✓ RPii login not required.")
+
+    except Exception as exc:
+        print(f"✗ RPii login failed: {exc}")
+        raise
+
 def get_queue_status(mirakl_state):
     """
     Convert Mirakl order state into a simple
@@ -122,6 +171,323 @@ def get_customer_surname(full_name):
     )
 
     return surname.title()
+
+
+
+def format_mirakl_delivery_deadline(mirakl_order):
+    """
+    Return Mirakl expected delivery latest date as DD/MM/YYYY.
+
+    This is NOT Mirakl's shipping_deadline.  B&Q exposes the
+    customer delivery window separately as delivery_date.latest.
+    """
+
+    delivery_deadline_raw = mirakl_order.get(
+        "delivery_date_latest"
+    )
+
+    if not delivery_deadline_raw:
+        raise RuntimeError(
+            "Mirakl did not return delivery_date_latest."
+        )
+
+    deadline_value = str(
+        delivery_deadline_raw
+    ).strip()
+
+    if deadline_value.endswith("Z"):
+        deadline_value = (
+            deadline_value[:-1] + "+00:00"
+        )
+
+    try:
+        return datetime.fromisoformat(
+            deadline_value
+        ).strftime("%d/%m/%Y")
+
+    except ValueError as exc:
+        raise RuntimeError(
+            "Mirakl shipping_deadline could not be "
+            "converted to DD/MM/YYYY.\n"
+            f"Raw value: {delivery_deadline_raw!r}"
+        ) from exc
+
+
+def add_rp2_delivery_deadline_note(
+    sales_frame,
+    mirakl_order,
+):
+    """
+    Add the Mirakl delivery deadline to RPii Delivery Notes.
+
+    Safety behaviour:
+    - Preserve existing Delivery Notes.
+    - Do not add the same deadline note twice.
+    - Click Save Notes once only.
+    - Re-open notes and verify the saved text.
+    """
+
+    delivery_deadline = (
+        format_mirakl_delivery_deadline(
+            mirakl_order
+        )
+    )
+
+    deadline_note = (
+        "**** IMPORTANT - DELIVERY DEADLINE - "
+        f"{delivery_deadline} ****"
+    )
+
+    print()
+    print("=" * 70)
+    print("RPii DELIVERY DEADLINE NOTE")
+    print("=" * 70)
+    print(
+        f"Mirakl delivery deadline: "
+        f"{delivery_deadline}"
+    )
+    print(
+        f"Required RPii note:       "
+        f"{deadline_note}"
+    )
+
+    add_notes_button = sales_frame.locator(
+        'img[title="Add notes to sale"]'
+    )
+
+    if add_notes_button.count() != 1:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "Could not uniquely identify the RPii "
+            "'Add notes to sale' button."
+        )
+
+    print()
+    print("Opening RPii Delivery Notes...")
+
+    add_notes_button.evaluate(
+        "element => element.click()"
+    )
+
+    delivery_note_field = sales_frame.locator(
+        "#tDelNote"
+    )
+
+    delivery_note_field.wait_for(
+        state="visible",
+        timeout=10000,
+    )
+
+    existing_note = (
+        delivery_note_field.input_value()
+        or ""
+    ).strip()
+
+    if deadline_note in existing_note:
+        print()
+        print(
+            "✓ Correct delivery deadline note already exists."
+        )
+        print(
+            "No RPii note write is required."
+        )
+
+        try:
+            delivery_note_field.evaluate(
+                "element => closeAlert()"
+            )
+        except Exception:
+            pass
+
+        return deadline_note
+
+    # Preserve every genuine RPii note, but replace any older
+    # deadline line previously created by this automation.
+    deadline_pattern = re.compile(
+        r"^\*\*\*\* IMPORTANT - DELIVERY DEADLINE - "
+        r"\d{2}/\d{2}/\d{4} \*\*\*\*$",
+        re.MULTILINE,
+    )
+
+    if deadline_pattern.search(existing_note):
+        new_note = deadline_pattern.sub(
+            deadline_note,
+            existing_note,
+            count=1,
+        )
+        print()
+        print(
+            "Existing automated delivery deadline found."
+        )
+        print(
+            "It will be replaced; all other Delivery Notes "
+            "will be preserved."
+        )
+    elif existing_note:
+        new_note = (
+            existing_note.rstrip()
+            + "\n"
+            + deadline_note
+        )
+    else:
+        new_note = deadline_note
+
+    if len(new_note) > 1000:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "Adding the delivery deadline would exceed "
+            "RPii's 1000-character Delivery Notes limit.\n"
+            "No RPii note has been saved."
+        )
+
+    print()
+    print("Existing Delivery Notes:")
+    print("-" * 70)
+    print(existing_note or "(blank)")
+    print("-" * 70)
+    print()
+    print("New Delivery Notes:")
+    print("-" * 70)
+    print(new_note)
+    print("-" * 70)
+
+    delivery_note_field.fill(
+        new_note
+    )
+
+    entered_note = (
+        delivery_note_field.input_value()
+        or ""
+    )
+
+    if entered_note != new_note:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "RPii Delivery Notes field did not contain "
+            "the expected text before saving.\n"
+            "Save Notes has NOT been clicked."
+        )
+
+    save_notes_button = sales_frame.locator(
+        'img[onclick*="saveCustNote("]'
+        '[onclick*="closeAlert()"]'
+    )
+
+    save_button_count = (
+        save_notes_button.count()
+    )
+
+    if save_button_count != 1:
+        raise RuntimeError(
+            "SAFETY STOP\n"
+            "Could not uniquely identify the RPii "
+            "Save Notes button.\n"
+            f"Matching controls found: {save_button_count}\n"
+            "The note has NOT been saved."
+        )
+
+    print()
+    print("Saving RPii Delivery Notes...")
+    print("One Save Notes click only.")
+
+    save_notes_button.evaluate(
+        "element => element.click()"
+    )
+
+    # saveCustNote(...);closeAlert() closes the note panel.
+    try:
+        delivery_note_field.wait_for(
+            state="hidden",
+            timeout=10000,
+        )
+    except Exception:
+        # Some RPii builds detach/rebuild the field instead.
+        pass
+
+    print(
+        "✓ Save Notes action submitted."
+    )
+
+    # --------------------------------------------------------
+    # READ-BACK VERIFICATION
+    # --------------------------------------------------------
+
+    print(
+        "Waiting for RPii to finish saving..."
+    )
+    time.sleep(1.0)
+
+    print(
+        "Re-opening Delivery Notes to verify..."
+    )
+
+    add_notes_button = sales_frame.locator(
+        'img[title="Add notes to sale"]'
+    )
+
+    add_notes_button.evaluate(
+        "element => element.click()"
+    )
+
+    verification_field = sales_frame.locator(
+        "#tDelNote"
+    )
+
+    verification_field.wait_for(
+        state="visible",
+        timeout=10000,
+    )
+
+    # RPii can render the notes window before the saved note
+    # value has finished loading. Poll the existing field for
+    # up to 10 seconds instead of checking it immediately.
+    verification_deadline = time.monotonic() + 10.0
+    saved_note = ""
+
+    while time.monotonic() < verification_deadline:
+        saved_note = (
+            verification_field.input_value()
+            or ""
+        )
+
+        if deadline_note in saved_note:
+            break
+
+        time.sleep(0.5)
+
+    if deadline_note not in saved_note:
+        raise RuntimeError(
+            "RPii Delivery Notes save could not be "
+            "verified after waiting for the saved value.\n"
+            "The Save Notes action may already have "
+            "occurred.\n"
+            "DO NOT automatically retry the note write."
+        )
+
+    print()
+    print(
+        "✓ RPii DELIVERY DEADLINE NOTE VERIFIED"
+    )
+    print(
+        f"  {deadline_note}"
+    )
+
+    # Close the verification panel WITHOUT saving again.
+    # RPii's own Save Notes onclick confirms closeAlert() is
+    # the dialog-close function used by this notes window.
+    try:
+        verification_field.evaluate(
+            "element => closeAlert()"
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "The deadline note was verified as saved, but "
+            "the RPii notes window could not be closed "
+            "cleanly after verification.\n"
+            f"Reason: {exc}"
+        ) from exc
+
+    return deadline_note
 
 
 def complete_mirakl_shipping(
@@ -522,11 +888,32 @@ def complete_mirakl_shipping(
     browser.close()
     raise SystemExit
 
+# Keep the existing adapter object because the rest of the
+# processor uses its marketplace name. The order queue itself is
+# now fetched directly from Mirakl instead of the Excel export.
 marketplace = DIYMarketplaceAdapter(
     ORDERS_FILE
 )
 
-marketplace_orders = marketplace.read_orders()
+try:
+    marketplace_orders = read_mirakl_shipping_orders()
+except Exception as error:
+    print()
+    print("=" * 70)
+    print("B&Q MIRAKL ORDER FETCH FAILED")
+    print("=" * 70)
+    print(error)
+    print()
+    print("No RPii processing has taken place.")
+    print("No Mirakl write has been made.")
+    print("=" * 70)
+    raise SystemExit
+
+if not marketplace_orders:
+    print()
+    print("No B&Q orders are currently awaiting shipment.")
+    print("Nothing to process.")
+    raise SystemExit
 
 print()
 print("=" * 100)
@@ -785,11 +1172,15 @@ with sync_playwright() as p:
     print(f"Opening: {RP2_URL}")
     print()
 
-        # --------------------------------------------------------
+    # --------------------------------------------------------
     # Open RPii and wait for the actual EPoS module
     # --------------------------------------------------------
 
     print("Opening RPii...")
+
+    page.goto(RP2_URL)
+
+    ensure_rpii_login(page)
 
     max_attempts = 3
     rp2_ready = False
@@ -2015,6 +2406,15 @@ with sync_playwright() as p:
 
         browser.close()
         raise SystemExit
+
+    # ========================================================
+    # ADD MIRAKL DELIVERY DEADLINE TO RPii DELIVERY NOTES
+    # ========================================================
+
+    add_rp2_delivery_deadline_note(
+        sales_frame=sales_frame,
+        mirakl_order=mirakl_order,
+    )
 
     # ========================================================
     # EXISTING DELIVERY MESSAGE - CONTINUE TO SHIPPING

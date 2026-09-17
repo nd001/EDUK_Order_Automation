@@ -178,6 +178,188 @@ def read_first_tesco_order(filename):
     return orders[0]
 
 
+
+# ============================================================
+# TESCO MIRAKL LIVE ORDER QUEUE
+# ============================================================
+
+def read_tesco_shipping_orders():
+    """
+    Read all Tesco Mirakl orders currently in SHIPPING state.
+
+    READ ONLY.
+
+    Safety behaviour:
+    - Uses GET requests only.
+    - Handles Mirakl pagination.
+    - Returns the same MarketplaceOrder objects used by the
+      existing Excel import route.
+    - Fails closed if an order cannot be represented safely.
+    """
+
+    if not TESCO_MIRAKL_API_KEY:
+        raise RuntimeError("TESCO_MIRAKL_API_KEY is missing.")
+
+    url = f"{TESCO_MIRAKL_URL.rstrip('/')}/api/orders"
+
+    headers = {
+        "Authorization": TESCO_MIRAKL_API_KEY,
+        "Accept": "application/json",
+    }
+
+    max_results = 100
+    offset = 0
+    marketplace_orders = []
+    seen_order_ids = set()
+
+    print()
+    print("=" * 70)
+    print("TESCO MIRAKL ORDER FETCH - READ ONLY")
+    print("=" * 70)
+    print("Fetching orders currently in SHIPPING state...")
+
+    while True:
+        params = {
+            "order_state_codes": "SHIPPING",
+            "max": max_results,
+            "offset": offset,
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                "Tesco Mirakl SHIPPING order fetch failed. "
+                f"HTTP {response.status_code}: {response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Tesco Mirakl SHIPPING order fetch did not return valid JSON."
+            ) from exc
+
+        raw_orders = data.get("orders")
+
+        if not isinstance(raw_orders, list):
+            raise RuntimeError(
+                "Tesco Mirakl SHIPPING order fetch returned an unexpected "
+                "response: 'orders' is not a list."
+            )
+
+        for raw_order in raw_orders:
+            if not isinstance(raw_order, dict):
+                raise RuntimeError(
+                    "Tesco Mirakl SHIPPING order fetch returned an "
+                    "unexpected order structure."
+                )
+
+            order_id = str(raw_order.get("order_id") or "").strip()
+            order_state = str(raw_order.get("order_state") or "").strip().upper()
+
+            if not order_id:
+                raise RuntimeError(
+                    "Tesco Mirakl returned a SHIPPING order without an order_id."
+                )
+
+            if order_state != "SHIPPING":
+                raise RuntimeError(
+                    f"Tesco Mirakl returned order {order_id} with unexpected "
+                    f"state {order_state!r}. Expected SHIPPING."
+                )
+
+            if order_id in seen_order_ids:
+                raise RuntimeError(
+                    f"Tesco Mirakl returned duplicate order {order_id} "
+                    "while paging the queue."
+                )
+
+            order_lines = raw_order.get("order_lines", [])
+            if not isinstance(order_lines, list) or not order_lines:
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} contains no order lines."
+                )
+
+            # The current Tesco processor validates/processes one product
+            # line. Do not silently choose a line if Mirakl returns more.
+            if len(order_lines) != 1:
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} contains "
+                    f"{len(order_lines)} order lines. "
+                    "The current Tesco processor expects exactly 1."
+                )
+
+            line = order_lines[0]
+            sku = str(line.get("offer_sku") or "").strip()
+            if not sku:
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} has no offer SKU."
+                )
+
+            customer = raw_order.get("customer") or {}
+            if not isinstance(customer, dict):
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} has invalid customer data."
+                )
+
+            shipping = customer.get("shipping_address") or {}
+            if not isinstance(shipping, dict):
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} has invalid shipping data."
+                )
+
+            postcode = str(shipping.get("zip_code") or "").strip()
+            if not postcode:
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} has no shipping postcode."
+                )
+
+            total_price = raw_order.get("total_price")
+            try:
+                price = float(total_price)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Tesco Mirakl order {order_id} has an invalid total "
+                    f"price: {total_price!r}."
+                ) from exc
+
+            marketplace_orders.append(
+                MarketplaceOrder(
+                    marketplace="TESCO",
+                    order_id=order_id,
+                    sku=sku,
+                    price=price,
+                    postcode=postcode,
+                    phone_1=str(shipping.get("phone") or "").strip(),
+                    phone_2=str(shipping.get("phone_secondary") or "").strip(),
+                )
+            )
+            seen_order_ids.add(order_id)
+
+        print(f"  Page offset {offset}: {len(raw_orders)} order(s)")
+
+        if len(raw_orders) < max_results:
+            break
+
+        offset += max_results
+
+    print()
+    print(
+        f"✓ Tesco Mirakl returned {len(marketplace_orders)} "
+        "order(s) awaiting shipment."
+    )
+    print("No Tesco Mirakl write has been made.")
+    print("=" * 70)
+
+    return marketplace_orders
+
+
 # ============================================================
 # TESCO MARKETPLACE ADAPTER
 # ============================================================

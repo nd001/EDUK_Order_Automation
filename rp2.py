@@ -76,6 +76,39 @@ def extract_web_ref(text):
 
     return match.group(1) if match else None
 
+# ============================================================
+# RPii     Extract the RPii internal order number from the sale header.
+# ============================================================
+
+def extract_rp2_order_number(text):
+    """
+    Extract the RPii internal order number from the sale header.
+
+    Example:
+
+        992819 • 11 • 10/ 9/26 11.00
+        • TESCO Sale
+        ...
+        Web Ref: 8431-2631-101-A
+
+    Returns:
+        "992819"
+    """
+
+    cleaned = " ".join(
+        str(text or "").split()
+    )
+
+    match = re.match(
+        r"^(\d+)\s*•",
+        cleaned
+    )
+
+    if not match:
+        return None
+
+    return match.group(1)
+
 
 # ============================================================
 # RPii CUSTOMER
@@ -131,7 +164,7 @@ def extract_delivery_customer(text):
         )[0].strip()
 
     tel_match = re.search(
-        r"T:\s*([0-9 ]+)",
+        r"T:\s*(\+?[0-9 ]+)",
         cleaned
     )
 
@@ -301,19 +334,21 @@ def parse_delivery_block(text):
 
 def read_active_product(sales_frame):
     """
-    Identify the first active product line.
+    Identify the first RPii product line.
 
-    This skips cancelled/problem lines such as WEBPART and
-    selects a product line containing a positive quantity.
+    RPii displays the product SKU before the first opening
+    parenthesis. Anything inside the parentheses is RPii
+    internal information and must not be interpreted as
+    quantity.
+
+    Quantity is deliberately not parsed here yet.
     """
 
     product_cells = sales_frame.locator(
         "td.SALES-lines-left-wrap"
     )
 
-    product_cell_count = (
-        product_cells.count()
-    )
+    product_cell_count = product_cells.count()
 
     sku = None
     description = None
@@ -324,6 +359,7 @@ def read_active_product(sales_frame):
         product_cell_count - 1,
         2
     ):
+
         sku_cell = product_cells.nth(i)
         desc_cell = product_cells.nth(i + 1)
 
@@ -343,33 +379,23 @@ def read_active_product(sales_frame):
             or None
         )
 
-        active_match = re.search(
-            r"\(\s*(\d+)\s+-",
-            sku_text
-        )
-
-        if not active_match:
-            continue
-
-        candidate_quantity = int(
-            active_match.group(1)
-        )
-
-        if candidate_quantity <= 0:
-            continue
-
-        # RPii may display spaces inside the SKU, for example:
+        # RPii SKU is everything before the first
+        # opening parenthesis.
         #
-        #     EY 48SB8 (1 - ...)
+        # Examples:
         #
-        # Everything before the quantity section is the SKU.
-        # Remove whitespace from that portion so it can be
-        # compared safely with marketplace/Mirakl SKUs.
+        # HUSHU269 (HUS-HU269)
+        # -> HUSHU269
+        #
+        # EY 48SB8 (...)
+        # -> EY48SB8
+        #
+        # Anything inside the parentheses is RPii
+        # internal information and is NOT quantity.
 
-        sku_part = re.split(
-            r"\(\s*\d+\s+-",
-            sku_text,
-            maxsplit=1,
+        sku_part = sku_text.split(
+            "(",
+            1
         )[0].strip()
 
         sku = re.sub(
@@ -378,25 +404,43 @@ def read_active_product(sales_frame):
             sku_part,
         )
 
+        # Ignore empty/non-product cells.
+        if not sku:
+            continue
+
         print()
         print("RPii SKU PARSE DIAGNOSTIC")
         print("-" * 60)
+
         print(
             f"Raw SKU cell:    {sku_text}"
         )
+
         print(
             f"Cleaned SKU:     {sku}"
         )
+
         print(
-            f"Raw description: {raw_description_text!r}"
+            f"Raw description: "
+            f"{raw_description_text!r}"
         )
+
         print(
-            f"Description:     {description_text!r}"
+            f"Description:     "
+            f"{description_text!r}"
         )
+
+        print(
+            "Quantity:        "
+            "Not currently parsed"
+        )
+
         print("-" * 60)
 
         description = description_text
-        quantity = candidate_quantity
+
+        # Quantity parsing deliberately deferred.
+        quantity = None
 
         break
 

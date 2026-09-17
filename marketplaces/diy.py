@@ -154,6 +154,202 @@ def read_first_bq_order(filename):
 
 
 # ============================================================
+# MIRAKL SHIPPING QUEUE
+# ============================================================
+
+def read_mirakl_shipping_orders():
+    """
+    Read all B&Q / DIY Mirakl orders currently in SHIPPING state.
+
+    READ ONLY.
+
+    Safety behaviour:
+    - Uses GET requests only.
+    - Handles Mirakl pagination.
+    - Returns the same MarketplaceOrder objects used by the
+      existing Excel import route.
+    - Fails closed if an order cannot be represented safely.
+    """
+
+    url = (
+        f"{MIRAKL_BASE_URL.rstrip('/')}"
+        f"/api/orders"
+    )
+
+    headers = {
+        "Authorization": MIRAKL_API_KEY,
+        "Accept": "application/json",
+    }
+
+    max_results = 100
+    offset = 0
+    marketplace_orders = []
+    seen_order_ids = set()
+
+    print()
+    print("=" * 70)
+    print("B&Q MIRAKL ORDER FETCH - READ ONLY")
+    print("=" * 70)
+    print("Fetching orders currently in SHIPPING state...")
+
+    while True:
+        params = {
+            "order_state_codes": "SHIPPING",
+            "max": max_results,
+            "offset": offset,
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                "Mirakl SHIPPING order fetch failed. "
+                f"HTTP {response.status_code}: "
+                f"{response.text}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Mirakl SHIPPING order fetch did not return "
+                "valid JSON."
+            ) from exc
+
+        raw_orders = data.get("orders")
+
+        if not isinstance(raw_orders, list):
+            raise RuntimeError(
+                "Mirakl SHIPPING order fetch returned an "
+                "unexpected response: 'orders' is not a list."
+            )
+
+        for raw_order in raw_orders:
+            order_id = str(
+                raw_order.get("order_id") or ""
+            ).strip()
+
+            order_state = str(
+                raw_order.get("order_state") or ""
+            ).strip().upper()
+
+            if not order_id:
+                raise RuntimeError(
+                    "Mirakl returned a SHIPPING order without "
+                    "an order_id."
+                )
+
+            if order_state != "SHIPPING":
+                raise RuntimeError(
+                    f"Mirakl returned order {order_id} with "
+                    f"unexpected state {order_state!r}. "
+                    "Expected SHIPPING."
+                )
+
+            if order_id in seen_order_ids:
+                raise RuntimeError(
+                    f"Mirakl returned duplicate order "
+                    f"{order_id} while paging the queue."
+                )
+
+            order_lines = raw_order.get("order_lines", [])
+
+            if not isinstance(order_lines, list) or not order_lines:
+                raise RuntimeError(
+                    f"Mirakl order {order_id} contains no "
+                    "order lines."
+                )
+
+            # The existing B&Q processor is designed around one
+            # active marketplace product per order. Do not silently
+            # guess which line to process if Mirakl returns more.
+            if len(order_lines) != 1:
+                raise RuntimeError(
+                    f"Mirakl order {order_id} contains "
+                    f"{len(order_lines)} order lines. "
+                    "The current B&Q processor expects exactly 1."
+                )
+
+            line = order_lines[0]
+            sku = str(
+                line.get("offer_sku") or ""
+            ).strip()
+
+            if not sku:
+                raise RuntimeError(
+                    f"Mirakl order {order_id} has no offer SKU."
+                )
+
+            customer = raw_order.get("customer") or {}
+            shipping = customer.get("shipping_address") or {}
+
+            postcode = str(
+                shipping.get("zip_code") or ""
+            ).strip()
+
+            if not postcode:
+                raise RuntimeError(
+                    f"Mirakl order {order_id} has no shipping "
+                    "postcode."
+                )
+
+            total_price = raw_order.get("total_price")
+
+            try:
+                price = float(total_price)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Mirakl order {order_id} has an invalid "
+                    f"total price: {total_price!r}."
+                ) from exc
+
+            marketplace_orders.append(
+                MarketplaceOrder(
+                    marketplace="DIY",
+                    order_id=order_id,
+                    sku=sku,
+                    price=price,
+                    postcode=postcode,
+                    phone_1=str(
+                        shipping.get("phone") or ""
+                    ).strip(),
+                    phone_2=str(
+                        shipping.get("phone_secondary") or ""
+                    ).strip(),
+                )
+            )
+
+            seen_order_ids.add(order_id)
+
+        print(
+            f"  Page offset {offset}: "
+            f"{len(raw_orders)} order(s)"
+        )
+
+        # A short page is the final page. An empty page also ends
+        # the loop safely.
+        if len(raw_orders) < max_results:
+            break
+
+        offset += max_results
+
+    print()
+    print(
+        f"✓ Mirakl returned {len(marketplace_orders)} "
+        "B&Q order(s) awaiting shipment."
+    )
+    print("No Mirakl write has been made.")
+    print("=" * 70)
+
+    return marketplace_orders
+
+
+# ============================================================
 # MIRAKL ORDER LOOKUP
 # ============================================================
 
@@ -209,6 +405,7 @@ def read_mirakl_order(order_id):
 
     order = orders[0]
 
+    
     customer = order.get(
         "customer",
         {}
@@ -224,6 +421,7 @@ def read_mirakl_order(order_id):
         []
     )
 
+    
     if not order_lines:
 
         raise RuntimeError(
@@ -273,6 +471,14 @@ def read_mirakl_order(order_id):
         ),
         "shipping_deadline": order.get(
             "shipping_deadline"
+        ),
+        "delivery_date_earliest": (
+                order.get("delivery_date", {})
+                .get("earliest")
+        ),
+        "delivery_date_latest": (
+            order.get("delivery_date", {})
+            .get("latest")
         ),
     }
 

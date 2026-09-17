@@ -27,3 +27,13 @@ __pycache__/
 
 # Local scratch files
 clipboard.txt
+
+# Runtime/cache data
+tesco_rp2_tracking_cache.json
+
+# Local Windows shortcuts
+*.lnk
+
+# Local backup/archive files
+OLD PYTHON SCRIPTS/
+*_original.py
